@@ -54,22 +54,34 @@ Forge is a production-grade, local-first platform designed for fine-tuning, mana
 
 ---
 
-## ⚡ Quick Start
+## ⚡ Quick Start (Zero-Config)
 
-### 1. Prerequisites
-- **Python 3.10+**
-- **Node.js 18+**
-- **Ollama** installed and running (`ollama serve`)
+Forge features a fully automated setup script that handles dependency installation, hardware detection, and external tool configuration (Ollama, LLaMA-Factory).
 
-### 2. Backend Setup
+### 1. One-Click Setup
+```bash
+cd forge-backend
+python start.py
+```
+**What this script does:**
+- ✅ Checks Python version (3.11+ required).
+- ✅ Detects GPU (NVIDIA or Apple Silicon).
+- ✅ Auto-installs missing Python dependencies.
+- ✅ Auto-installs & starts **Ollama** if missing.
+- ✅ Auto-clones and installs **LLaMA-Factory** for training orchestration.
+- ✅ Launches the Studio in your default browser.
+
+### 2. Manual Setup (Optional)
+If you prefer to manage dependencies yourself:
+
+#### Backend
 ```bash
 cd forge-backend
 pip install -r requirements.txt
 python main.py
 ```
-*The backend will start at `http://localhost:8000`*
 
-### 3. Frontend Setup
+#### Frontend
 ```bash
 cd fromtedn
 npm install
