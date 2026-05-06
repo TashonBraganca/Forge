@@ -62,6 +62,7 @@ Forge features a fully automated setup script that handles dependency installati
 ```bash
 cd forge-backend
 python start.py
+
 ```
 **What this script does:**
 - ✅ Checks Python version (3.11+ required).
