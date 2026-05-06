@@ -69,6 +69,7 @@ python start.py
 - ✅ Auto-installs missing Python dependencies.
 - ✅ Auto-installs & starts **Ollama** if missing.
 - ✅ Auto-clones and installs **LLaMA-Factory** for training orchestration.
+- ✅ Auto-detects and starts the **Frontend Studio** (Vite).
 - ✅ Launches the Studio in your default browser.
 
 ### 2. Manual Setup (Optional)

@@ -408,6 +408,43 @@ def open_browser_later(url: str, delay: float = 2.5) -> None:
     threading.Thread(target=_open, daemon=True).start()
 
 
+# ── Frontend ─────────────────────────────────────────────────
+
+def start_frontend() -> None:
+    """Detect and start the frontend dev server in a background thread."""
+    backend_dir = Path(__file__).parent.resolve()
+    workspace_dir = backend_dir.parent
+    
+    # User requested 'fromtedn' as the primary frontend
+    frontend_dirs = ["fromtedn", "forge-ui"]
+    found_dir = None
+    for d in frontend_dirs:
+        if (workspace_dir / d / "package.json").exists():
+            found_dir = workspace_dir / d
+            break
+            
+    if not found_dir:
+        warn("No frontend directory (fromtedn or forge-ui) found in workspace")
+        return
+
+    step(f"Starting frontend ({found_dir.name})...")
+    
+    def _run():
+        try:
+            # Check for node_modules
+            if not (found_dir / "node_modules").exists():
+                step(f"Installing {found_dir.name} dependencies...")
+                subprocess.run(["npm", "install"], cwd=str(found_dir), capture_output=True, check=True)
+            
+            # Start dev server
+            subprocess.run(["npm", "run", "dev"], cwd=str(found_dir), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            fail(f"Frontend failed: {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
+    info("Frontend server initiated")
+
+
 # ── Main ─────────────────────────────────────────────────────
 
 def print_system_info() -> None:
@@ -491,6 +528,10 @@ def main() -> None:
     print()
 
     ensure_llamafactory()
+
+    print()
+
+    start_frontend()
 
     print()
     print("  ───────────────────────────────────────────")
