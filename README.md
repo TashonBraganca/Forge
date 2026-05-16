@@ -102,7 +102,7 @@ npm run dev
 - [x] Model Management & Ollama Library Search
 - [x] Persistent Job Tracking & Recovery
 - [x] Dataset Uploads & Kaggle Integration
-- [ ] Export to GGUF/Safetensors via Web UI *(In Progress)*
+- [x] Export to GGUF/Safetensors via Web UI
 - [ ] Multi-GPU Support
 - [ ] Integrated Dataset Labeling Tool
 - [ ] Remote Orchestration via SSH
