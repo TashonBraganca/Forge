@@ -8,14 +8,19 @@ Forge is a production-grade, local-first platform designed for fine-tuning, mana
 
 ---
 
-## 🚀 Core Features
+## 🚀 Core Features & Architecture
 
-- **Hardware-Aware Training**: Automatic detection of NVIDIA or Apple Silicon GPUs with real-time VRAM calculation and allocation.
-- **Ollama Native**: Direct integration with Ollama for model pulling, management, and inference.
-- **Advanced Orchestration**:
-  - **TrainView**: Surgical control over fine-tuning parameters (LoRA, Alpha, Epochs, Rank).
-  - **Hub**: Unified management for local datasets and model versions.
-  - **Playground**: High-fidelity, real-time inference playground with streaming support.
+Forge is built to handle the full lifecycle of local AI models, from discovery and dataset management to training and inference.
+
+- **Hardware-Aware Training Engine**: Automatic detection of NVIDIA or Apple Silicon GPUs with real-time VRAM calculation and allocation (`pynvml`).
+- **Deep Ollama Integration**: Native support for searching the Ollama library, streaming model pulls via SSE, and direct model management.
+- **Job Persistence & Recovery**: A robust SQLite-backed persistence layer that tracks training jobs, exports, and automatically recovers interrupted background tasks on startup.
+
+### 🎛️ The Forge Interface
+- **Models View**: Search the global Ollama library, download models with real-time progress bars, and manage local deployments.
+- **Train View**: Complete orchestration of **LLaMA-Factory** fine-tuning pipelines. Features surgical control over LoRA parameters, epochs, batch sizes, and learning rates.
+- **Hub View**: Unified dataset management supporting local JSON/CSV parsing and direct Kaggle dataset integration.
+- **Playground View**: High-fidelity chat interface for real-time SSE streaming inference to test your models instantly.
 - **Molten Forge Aesthetic**: A premium "Linear-meets-Raycast" UI featuring deep black backgrounds, ember particle systems, and sleek typography.
 
 ---
@@ -32,7 +37,7 @@ Forge is a production-grade, local-first platform designed for fine-tuning, mana
 ### Backend (`/forge-backend`)
 - **API**: [FastAPI](https://fastapi.tiangolo.com/)
 - **Runtime**: Python 3.10+
-- **Integrations**: [Ollama](https://ollama.com/), `pynvml` (GPU monitoring)
+- **Integrations**: [Ollama](https://ollama.com/), [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory), `pynvml` (GPU monitoring)
 - **Server**: Uvicorn
 
 ---
@@ -41,8 +46,8 @@ Forge is a production-grade, local-first platform designed for fine-tuning, mana
 
 ```bash
 ├── forge-backend/       # FastAPI Backend
-│   ├── routers/         # API Endpoints (Chat, Training, Models)
-│   ├── services/        # Business Logic (Ollama, Hardware, Datasets)
+│   ├── routers/         # API Endpoints (Chat, Training, Models, Datasets)
+│   ├── services/        # Business Logic (Ollama, Hardware, Export, Persistence)
 │   ├── utils/           # Log Parsers, VRAM Calculators
 │   └── main.py          # Entry point
 ├── fromtedn/            # React Frontend (Vite)
@@ -56,14 +61,14 @@ Forge is a production-grade, local-first platform designed for fine-tuning, mana
 
 ## ⚡ Quick Start (Zero-Config)
 
-Forge features a fully automated setup script that handles dependency installation, hardware detection, and external tool configuration (Ollama, LLaMA-Factory).
+Forge features a fully automated setup script that handles dependency installation, hardware detection, and external tool configuration.
 
 ### 1. One-Click Setup
 ```bash
 cd forge-backend
 python start.py
-
 ```
+
 **What this script does:**
 - ✅ Checks Python version (3.11+ required).
 - ✅ Detects GPU (NVIDIA or Apple Silicon).
@@ -94,8 +99,11 @@ npm run dev
 ---
 
 ## 🔮 Roadmap
+- [x] Model Management & Ollama Library Search
+- [x] Persistent Job Tracking & Recovery
+- [x] Dataset Uploads & Kaggle Integration
+- [ ] Export to GGUF/Safetensors via Web UI *(In Progress)*
 - [ ] Multi-GPU Support
-- [ ] Export to GGUF/Safetensors via Web UI
 - [ ] Integrated Dataset Labeling Tool
 - [ ] Remote Orchestration via SSH
 
