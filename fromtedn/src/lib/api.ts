@@ -10,7 +10,8 @@ const API_BASE = 'http://localhost:8421';
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const url = `${API_BASE}${path}`;
-  console.log(`[FORGE API] ${options?.method || 'GET'} ${url}`);
+  const isHealthCheck = path === '/api/health';
+  if (!isHealthCheck) console.log(`[FORGE API] ${options?.method || 'GET'} ${url}`);
 
   try {
     const res = await fetch(url, {
@@ -25,7 +26,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     }
 
     const data = await res.json();
-    console.log(`[FORGE API] ✓ ${url}`, data);
+    if (!isHealthCheck) console.log(`[FORGE API] ✓ ${url}`, data);
     return data as T;
   } catch (err) {
     if (err instanceof TypeError && err.message.includes('fetch')) {
@@ -71,6 +72,13 @@ export interface HardwareStats {
   // System
   platform: string;
   forge_version: string;
+  db_ready: boolean;
+  database_path: string;
+  datasets_dir_ready: boolean;
+  models_dir_ready: boolean;
+  jobs_dir_ready: boolean;
+  training_backend_available: boolean;
+  simulation_fallback_available: boolean;
 }
 
 export interface ModelInfo {
@@ -94,6 +102,11 @@ export interface DatasetMeta {
   valid_rows: number;
   file_path: string;
   size_bytes: number;
+  columns: string[];
+  validation_status: 'pending' | 'valid' | 'invalid' | 'unknown';
+  preview_rows: Record<string, unknown>[];
+  source: string;
+  validation_message: string | null;
   issues: { row_index: number; field: string; message: string }[];
   created_at: string;
 }
@@ -115,14 +128,30 @@ export interface TrainingConfig {
 
 export interface TrainingJob {
   job_id: string;
-  status: 'queued' | 'running' | 'complete' | 'failed' | 'cancelled';
+  status: 'queued' | 'preparing' | 'training' | 'complete' | 'failed' | 'cancelled';
   config: TrainingConfig;
   created_at: string;
+  started_at: string | null;
   completed_at: string | null;
   current_step: number;
   total_steps: number;
+  progress: number;
+  current_epoch: number;
+  current_loss: number | null;
   final_loss: number | null;
   output_model_path: string | null;
+  simulation_mode: boolean;
+  error_message: string | null;
+  loss_history: number[];
+  latest_logs: string[];
+  export_status: 'not_started' | 'pending' | 'running' | 'completed' | 'failed';
+  export_model_name: string | null;
+}
+
+export interface TrainingStartResponse {
+  job_id: string | null;
+  mode: 'live' | 'simulation' | 'disabled';
+  message: string | null;
 }
 
 export interface TrainingEvent {
@@ -132,10 +161,49 @@ export interface TrainingEvent {
   loss: number | null;
   lr: number | null;
   grad_norm: number | null;
+  epoch: number | null;
   eta_seconds: number | null;
   message: string | null;
   level: 'INFO' | 'WARNING' | 'ERROR' | null;
   timestamp: string;
+}
+
+export interface FineTunedModelInfo {
+  id: string;
+  job_id: string;
+  name: string;
+  base_model: string;
+  method: 'lora' | 'qlora' | 'full';
+  status: string;
+  export_format: string;
+  export_status: string;
+  artifact_path: string;
+  ollama_model_name: string | null;
+  final_loss: number | null;
+  created_at: string;
+  exported_at: string | null;
+}
+
+export interface ExportArtifactInfo {
+  id: string;
+  job_id: string;
+  model_id: string | null;
+  export_format: string;
+  export_status: string;
+  source_path: string;
+  target_path: string | null;
+  ollama_model_name: string | null;
+  error_message: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface OllamaLibraryModel {
+  name: string;
+  description: string;
+  tags: string[];
+  pulls: number;
+  size: string;
 }
 
 // ── API Methods ────────────────────────────────────────────
@@ -152,6 +220,7 @@ export const api = {
   // Datasets
   getDatasets: () => request<DatasetMeta[]>('/api/datasets'),
   getDataset: (id: string) => request<DatasetMeta>(`/api/datasets/${id}`),
+  getDatasetPreview: (id: string) => request<DatasetMeta>(`/api/datasets/${id}/preview`),
   uploadDataset: async (file: File): Promise<DatasetMeta> => {
     const url = `${API_BASE}/api/datasets/upload`;
     console.log(`[FORGE API] POST ${url} (file: ${file.name}, ${file.size} bytes)`);
@@ -166,13 +235,19 @@ export const api = {
 
   // Training
   startTraining: (config: TrainingConfig) =>
-    request<{ job_id: string }>('/api/training/start', {
+    request<TrainingStartResponse>('/api/training/start', {
       method: 'POST',
       body: JSON.stringify(config),
     }),
 
   cancelTraining: (jobId: string) =>
     request<{ status: string }>(`/api/training/cancel/${jobId}`, { method: 'POST' }),
+
+  exportModel: (jobId: string, ollamaModelName: string) =>
+    request<{ status: string; job_id: string; export_model_name: string }>(`/api/training/export/${jobId}`, {
+      method: 'POST',
+      body: JSON.stringify({ ollama_model_name: ollamaModelName }),
+    }),
 
   getJobs: () => request<TrainingJob[]>('/api/training/jobs'),
 
@@ -188,18 +263,28 @@ export const api = {
 
     const es = new EventSource(url);
 
+    let isClosed = false;
+
     es.onmessage = (msg) => {
+      if (isClosed) return;
       try {
         const event: TrainingEvent = JSON.parse(msg.data);
         console.log(`[FORGE SSE] ${event.type}`, event.loss !== null ? `loss=${event.loss}` : '', event.message || '');
         onEvent(event);
+        if (event.type === 'complete' || event.type === 'error') {
+          isClosed = true;
+          es.close();
+        }
       } catch (err) {
         console.error('[FORGE SSE] Failed to parse event:', msg.data, err);
       }
     };
 
     es.onerror = (err) => {
+      if (isClosed) return;
       console.error('[FORGE SSE] Connection error:', err);
+      isClosed = true;
+      es.close(); // Prevent browser from infinitely reconnecting
       onError?.(err);
     };
 
@@ -280,6 +365,19 @@ export const api = {
     // Return a fake EventSource that supports close()
     return { close: () => controller.abort() } as unknown as EventSource;
   },
+
+  // Registry / export
+  getRegistryModels: () => request<FineTunedModelInfo[]>('/api/models/registry'),
+  getExportArtifacts: () => request<ExportArtifactInfo[]>('/api/models/artifacts'),
+  getExportArtifact: (artifactId: string) => request<ExportArtifactInfo>(`/api/models/artifacts/${artifactId}`),
+
+  // Datasets (optional source)
+  searchKaggleDatasets: (q: string, limit = 20) =>
+    request<{ items: unknown[]; enabled: boolean }>(`/api/datasets/kaggle/search?q=${encodeURIComponent(q)}&limit=${limit}`),
+
+  // Ollama library search — discover models available for pulling
+  searchOllamaLibrary: (q: string, limit = 20) =>
+    request<OllamaLibraryModel[]>(`/api/models/ollama/search?q=${encodeURIComponent(q)}&limit=${limit}`),
 };
 
 // ── Connection Check ───────────────────────────────────────
@@ -297,6 +395,7 @@ export async function checkBackendConnection(): Promise<boolean> {
       ram: `${stats.ram_free_gb}/${stats.ram_total_gb} GB`,
       ollama: stats.ollama_running ? '✓' : '✗',
       llamafactory: stats.llamafactory_available ? '✓' : '✗ (simulation mode)',
+      db: stats.db_ready ? '✓' : '✗',
     });
     return true;
   } catch {

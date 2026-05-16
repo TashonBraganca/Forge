@@ -16,6 +16,13 @@ function ModelSelector() {
   }, [fetchOllamaModels]);
 
   useEffect(() => {
+    const downloadedModels = hubModels.filter((model) => model.status === 'downloaded');
+    if (downloadedModels.length > 0 && !downloadedModels.some((model) => model.id === chatConfig.modelId)) {
+      setChatConfig({ modelId: downloadedModels[0].id });
+    }
+  }, [hubModels, chatConfig.modelId, setChatConfig]);
+
+  useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
     };

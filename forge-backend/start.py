@@ -363,6 +363,7 @@ def ensure_env_file() -> None:
     defaults = {
         "FORGE_HOST": "localhost",
         "FORGE_PORT": "8421",
+        "DATABASE_PATH": str(home / "forge" / "forge.db"),
         "FRONTEND_ORIGIN": "http://localhost:3004",
         "OLLAMA_BASE_URL": "http://localhost:11434",
         "LLAMAFACTORY_DIR": str(home / "LLaMA-Factory"),
@@ -373,6 +374,7 @@ def ensure_env_file() -> None:
         "HUGGINGFACE_TOKEN": "",
         "KAGGLE_USERNAME": "",
         "KAGGLE_KEY": "",
+        "ALLOW_SIMULATION_FALLBACK": "true",
     }
 
     if env_path.exists():

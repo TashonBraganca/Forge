@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type { HubModel, FineTunedModel, ChatMessage, ChatConfig } from '../types';
-import { MOCK_HUB_MODELS, MOCK_FINETUNED_MODELS } from '../lib/mock-data';
 import { api } from '../lib/api';
+import type { OllamaLibraryModel } from '../lib/api';
 
 const API_BASE = 'http://localhost:8421';
 
@@ -13,48 +13,42 @@ interface ModelStore {
   expandedModelId: string | null;
   loading: boolean;
 
+  // Ollama library search
+  ollamaSearchResults: OllamaLibraryModel[];
+  ollamaSearchLoading: boolean;
+  ollamaSearchQuery: string;
+
   setSearchQuery: (q: string) => void;
   setActiveFilter: (f: string) => void;
   toggleExpanded: (id: string) => void;
   getFilteredModels: () => HubModel[];
   fetchOllamaModels: () => Promise<void>;
+  fetchRegistryModels: () => Promise<void>;
   pullModel: (modelName: string) => void;
+  cancelPull: (modelName: string) => void;
   deleteModel: (modelName: string) => Promise<void>;
+  searchOllamaLibrary: (q: string) => void;
+  clearOllamaSearch: () => void;
 }
 
-let searchTimeout: ReturnType<typeof setTimeout>;
+let ollamaSearchTimeout: ReturnType<typeof setTimeout>;
+const activePullControllers = new Map<string, AbortController>();
 
 export const useModelStore = create<ModelStore>((set, get) => ({
-  hubModels: MOCK_HUB_MODELS,
-  fineTunedModels: MOCK_FINETUNED_MODELS,
+  hubModels: [],
+  fineTunedModels: [],
   searchQuery: '',
   activeFilter: 'all',
   expandedModelId: null,
   loading: false,
+  ollamaSearchResults: [],
+  ollamaSearchLoading: false,
+  ollamaSearchQuery: '',
 
   setSearchQuery: (q) => {
     set({ searchQuery: q });
-    if (q.length >= 2) {
-      clearTimeout(searchTimeout);
-      searchTimeout = setTimeout(() => {
-        api.searchHFModels(q, 10).then(hfModels => {
-          set(s => {
-            const existingIds = new Set(s.hubModels.map(m => m.id));
-            const newModels = hfModels.filter(m => !existingIds.has(m.id)).map(m => ({
-              id: m.id,
-              name: m.name,
-              params: m.vram_required_gb ? `${m.vram_required_gb}GB VRAM` : '?',
-              format: m.quantization || m.source.toUpperCase(),
-              size: `${m.size_gb} GB`,
-              status: m.is_installed ? 'downloaded' as const : 'available' as const,
-              downloadProgress: 0,
-              description: m.tags ? m.tags.join(', ') : 'HuggingFace Model',
-            }));
-            return { hubModels: [...s.hubModels, ...newModels] };
-          });
-        }).catch(() => {});
-      }, 500);
-    }
+    // HuggingFace models are NOT added to hubModels — use the Ollama library
+    // search dropdown for discovering and pulling remote models instead.
   },
   setActiveFilter: (f) => set({ activeFilter: f }),
   toggleExpanded: (id) =>
@@ -64,37 +58,64 @@ export const useModelStore = create<ModelStore>((set, get) => ({
     set({ loading: true });
     try {
       const models = await api.getOllamaModels();
-      if (models.length > 0) {
-        console.log(`[MODEL STORE] ✓ Fetched ${models.length} Ollama models`);
-        const hubModels: HubModel[] = models.map((m) => ({
-          id: m.id,
-          name: m.name,
-          params: `${m.size_gb < 5 ? '3B' : m.size_gb < 10 ? '7B' : m.size_gb < 20 ? '13B' : '70B'}`,
-          format: m.quantization ? `GGUF ${m.quantization}` : 'SafeTensors',
-          size: `${m.size_gb} GB`,
-          status: 'downloaded' as const,
-          downloadProgress: 100,
-          description: `${m.family} model — ${m.name}`,
-        }));
-        const downloading = get().hubModels.filter((m) => m.status === 'downloading');
-        const downloadingIds = new Set(downloading.map((m) => m.id));
-        const merged = [
-          ...downloading,
-          ...hubModels.filter((m) => !downloadingIds.has(m.id)),
-        ];
-        set({ hubModels: merged });
-      } else {
-        console.log('[MODEL STORE] No Ollama models, using mock data');
-      }
+      console.log(`[MODEL STORE] ✓ Fetched ${models.length} Ollama models`);
+      const hubModels: HubModel[] = models.map((m) => ({
+        id: m.id,
+        name: m.name,
+        params: `${m.size_gb < 5 ? '3B' : m.size_gb < 10 ? '7B' : m.size_gb < 20 ? '13B' : '70B'}`,
+        format: m.quantization ? `GGUF ${m.quantization}` : 'SafeTensors',
+        size: `${m.size_gb} GB`,
+        status: 'downloaded' as const,
+        downloadProgress: 100,
+        description: `${m.family} model — ${m.name}`,
+      }));
+      const downloading = get().hubModels.filter((m) => m.status === 'downloading');
+      const downloadingIds = new Set(downloading.map((m) => m.id));
+      const merged = [
+        ...downloading,
+        ...hubModels.filter((m) => !downloadingIds.has(m.id)),
+      ];
+      set({ hubModels: merged });
     } catch {
-      console.warn('[MODEL STORE] ✗ Failed to fetch Ollama models, using mock data');
+      console.warn('[MODEL STORE] ✗ Failed to fetch Ollama models');
     } finally {
       set({ loading: false });
     }
   },
 
+  fetchRegistryModels: async () => {
+    try {
+      const models = await api.getRegistryModels();
+      set({
+        fineTunedModels: models.map((model) => ({
+          id: model.id,
+          jobId: model.job_id,
+          name: model.name,
+          baseModel: model.base_model,
+          method: model.method,
+          status: model.status,
+          exportFormat: model.export_format,
+          exportStatus: model.export_status,
+          artifactPath: model.artifact_path,
+          ollamaModelName: model.ollama_model_name,
+          finalLoss: model.final_loss,
+          date: model.exported_at || model.created_at,
+        })),
+      });
+    } catch {
+      // Keep the registry empty rather than inventing models.
+      set({ fineTunedModels: [] });
+    }
+  },
+
   pullModel: (modelName: string) => {
-    console.log(`[MODEL STORE] Pulling model: ${modelName}`);
+    console.log(`[MODEL STORE] ⬇ Pulling model: ${modelName}`);
+
+    // Parse model name for better display (e.g. "gemma3:12b" → params="12B", name stays)
+    const parts = modelName.split(':');
+    const baseName = parts[0];
+    const tag = parts[1] || 'latest';
+    const guessedParams = tag.match(/(\d+\.?\d*)b/i) ? tag.toUpperCase() : tag === 'latest' ? '' : tag;
 
     set((s) => {
       const existing = s.hubModels.find((m) => m.name === modelName || m.id === modelName);
@@ -102,7 +123,7 @@ export const useModelStore = create<ModelStore>((set, get) => ({
         return {
           hubModels: s.hubModels.map((m) =>
             m.name === modelName || m.id === modelName
-              ? { ...m, status: 'downloading' as const, downloadProgress: 0 }
+              ? { ...m, status: 'downloading' as const, downloadProgress: 0, description: 'Starting download...' }
               : m,
           ),
         };
@@ -113,25 +134,35 @@ export const useModelStore = create<ModelStore>((set, get) => ({
           {
             id: modelName,
             name: modelName,
-            params: '?',
-            format: 'Pulling...',
-            size: '...',
+            params: guessedParams || baseName,
+            format: 'GGUF',
+            size: 'downloading...',
             status: 'downloading' as const,
             downloadProgress: 0,
-            description: `Downloading ${modelName}...`,
+            description: 'Starting download...',
           },
         ],
       };
     });
 
     const controller = new AbortController();
+    // Store the controller so we can cancel
+    activePullControllers.set(modelName, controller);
+
     fetch(`${API_BASE}/api/models/pull/${encodeURIComponent(modelName)}`, {
       method: 'POST',
       signal: controller.signal,
     })
       .then(async (res) => {
         if (!res.ok) {
-          console.error('[MODEL STORE] Pull failed:', res.status);
+          console.error(`[MODEL STORE] ✗ Pull failed: ${res.status}`);
+          set((s) => ({
+            hubModels: s.hubModels.map((m) =>
+              m.name === modelName || m.id === modelName
+                ? { ...m, status: 'available' as const, description: `Pull failed (${res.status})` }
+                : m,
+            ),
+          }));
           return;
         }
         const reader = res.body?.getReader();
@@ -155,6 +186,13 @@ export const useModelStore = create<ModelStore>((set, get) => ({
                 const progress = data.progress || 0;
                 const status = data.status || '';
 
+                // Build a human-readable size string from total bytes
+                const totalBytes = data.total || 0;
+                const completedBytes = data.completed || 0;
+                const sizeStr = totalBytes > 0
+                  ? `${(completedBytes / 1e9).toFixed(1)} / ${(totalBytes / 1e9).toFixed(1)} GB`
+                  : '';
+
                 set((s) => ({
                   hubModels: s.hubModels.map((m) =>
                     m.name === modelName || m.id === modelName
@@ -162,6 +200,7 @@ export const useModelStore = create<ModelStore>((set, get) => ({
                           ...m,
                           downloadProgress: progress,
                           description: status,
+                          size: sizeStr || m.size,
                         }
                       : m,
                   ),
@@ -169,20 +208,49 @@ export const useModelStore = create<ModelStore>((set, get) => ({
 
                 if (status === 'success') {
                   console.log(`[MODEL STORE] ✓ Pull complete: ${modelName}`);
+                  activePullControllers.delete(modelName);
                   setTimeout(() => get().fetchOllamaModels(), 500);
                 }
               } catch {
-                // skip
+                // skip malformed SSE lines
               }
             }
           }
         }
       })
       .catch((err) => {
-        if (err.name !== 'AbortError') {
-          console.error('[MODEL STORE] Pull error:', err);
+        activePullControllers.delete(modelName);
+        if (err.name === 'AbortError') {
+          console.log(`[MODEL STORE] ⏹ Pull cancelled: ${modelName}`);
+          set((s) => ({
+            hubModels: s.hubModels.filter((m) => m.name !== modelName && m.id !== modelName),
+          }));
+          // Refresh the model list
+          setTimeout(() => get().fetchOllamaModels(), 300);
+        } else {
+          console.error('[MODEL STORE] ✗ Pull error:', err);
+          set((s) => ({
+            hubModels: s.hubModels.map((m) =>
+              m.name === modelName || m.id === modelName
+                ? { ...m, status: 'available' as const, description: 'Pull failed — backend offline?' }
+                : m,
+            ),
+          }));
         }
       });
+  },
+
+  cancelPull: (modelName: string) => {
+    const controller = activePullControllers.get(modelName);
+    if (controller) {
+      console.log(`[MODEL STORE] ⏹ Cancelling pull: ${modelName}`);
+      controller.abort();
+      activePullControllers.delete(modelName);
+    }
+    // Also tell the backend to cancel the Ollama pull
+    fetch(`${API_BASE}/api/models/pull/cancel/${encodeURIComponent(modelName)}`, {
+      method: 'POST',
+    }).catch(() => { /* ignore — best effort */ });
   },
 
   deleteModel: async (modelName: string) => {
@@ -206,6 +274,38 @@ export const useModelStore = create<ModelStore>((set, get) => ({
     } catch (err) {
       console.error('[MODEL STORE] Delete error:', err);
     }
+  },
+
+  searchOllamaLibrary: (q: string) => {
+    set({ ollamaSearchQuery: q });
+    if (q.length < 2) {
+      set({ ollamaSearchResults: [], ollamaSearchLoading: false });
+      return;
+    }
+    set({ ollamaSearchLoading: true });
+    clearTimeout(ollamaSearchTimeout);
+    ollamaSearchTimeout = setTimeout(() => {
+      console.log('[MODEL STORE] 🔍 Searching Ollama library for:', q);
+      api.searchOllamaLibrary(q, 15)
+        .then((results) => {
+          // Filter out models already downloaded
+          const installed = new Set(get().hubModels.filter(m => m.status === 'downloaded').map(m => m.name.split(':')[0]));
+          const enriched = results.map(r => ({
+            ...r,
+            isInstalled: installed.has(r.name),
+          }));
+          console.log(`[MODEL STORE] ✓ Ollama library: ${results.length} results, ${enriched.filter(r => r.isInstalled).length} already installed`);
+          set({ ollamaSearchResults: results, ollamaSearchLoading: false });
+        })
+        .catch((err) => {
+          console.warn('[MODEL STORE] ✗ Ollama library search failed:', err.message);
+          set({ ollamaSearchResults: [], ollamaSearchLoading: false });
+        });
+    }, 300);
+  },
+
+  clearOllamaSearch: () => {
+    set({ ollamaSearchResults: [], ollamaSearchQuery: '', ollamaSearchLoading: false });
   },
 
   getFilteredModels: () => {
@@ -323,25 +423,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           set({ activeStream: null });
         }
       },
-      () => {
-        console.warn('[CHAT] ✗ Stream failed, using simulation');
-        setTimeout(() => {
-          const responses = [
-            'I can help with that. Based on the training data, here is my analysis...',
-            'The fine-tuned model shows improved performance on this type of query. Let me elaborate...',
-            'Processing your request through the local model. The response latency is approximately 42ms/token.',
-            'That is an interesting question. Let me reason through this step by step.',
-          ];
-          set((s) => ({
-            messages: [...s.messages, {
-              id: assistantMsgId,
-              role: 'assistant' as const,
-              content: responses[Math.floor(Math.random() * responses.length)],
-            }],
-            isGenerating: false,
-            activeStream: null,
-          }));
-        }, 1200 + Math.random() * 800);
+      (err) => {
+        console.warn('[CHAT] ✗ Stream failed:', err);
+        set((s) => {
+          const msgs = [...s.messages];
+          const existing = msgs.findIndex((m) => m.id === assistantMsgId);
+          if (existing >= 0) {
+            msgs[existing] = { ...msgs[existing], content: `*Error:* ${err}` };
+          } else {
+            msgs.push({ id: assistantMsgId, role: 'assistant', content: `*Error:* ${err}` });
+          }
+          return { messages: msgs, isGenerating: false, activeStream: null };
+        });
       },
     );
 

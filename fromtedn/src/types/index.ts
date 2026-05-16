@@ -33,10 +33,16 @@ export interface HubModel {
 
 export interface FineTunedModel {
   id: string;
+  jobId: string;
   name: string;
   baseModel: string;
   method: TrainingMethod;
-  finalLoss: number;
+  status: string;
+  exportFormat: string;
+  exportStatus: string;
+  artifactPath: string;
+  ollamaModelName?: string | null;
+  finalLoss?: number | null;
   date: string;
 }
 
@@ -52,4 +58,10 @@ export interface ChatConfig {
   topP: number;
   maxTokens: number;
   systemPrompt: string;
+}
+
+export interface TrainingStartResponse {
+  job_id: string | null;
+  mode: 'live' | 'simulation' | 'disabled';
+  message: string | null;
 }

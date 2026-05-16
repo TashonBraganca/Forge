@@ -11,6 +11,7 @@ from typing import Literal
 
 from config import settings
 from models.schemas import DatasetMeta, ValidationIssue
+from services.persistence import save_dataset_record
 
 
 def detect_format(file_path: Path) -> Literal["alpaca", "sharegpt", "unknown"]:
@@ -151,6 +152,58 @@ def validate_dataset(file_path: Path, fmt: Literal["alpaca", "sharegpt", "unknow
     return len(rows), valid, all_issues
 
 
+def _preview_rows(file_path: Path, fmt: Literal["alpaca", "sharegpt", "unknown"], limit: int = 5) -> tuple[list[str], list[dict]]:
+    columns: list[str] = []
+    preview: list[dict] = []
+    suffix = file_path.suffix.lower()
+
+    try:
+        if suffix == ".csv":
+            with file_path.open("r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                columns = list(reader.fieldnames or [])
+                for row in reader:
+                    preview.append(dict(row))
+                    if len(preview) >= limit:
+                        break
+        elif suffix == ".jsonl":
+            with file_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    obj = json.loads(line)
+                    if isinstance(obj, dict):
+                        preview.append(obj)
+                        for key in obj.keys():
+                            if key not in columns:
+                                columns.append(key)
+                    if len(preview) >= limit:
+                        break
+        elif suffix == ".json":
+            with file_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                for item in data[:limit]:
+                    if isinstance(item, dict):
+                        preview.append(item)
+                        for key in item.keys():
+                            if key not in columns:
+                                columns.append(key)
+            elif isinstance(data, dict):
+                preview.append(data)
+                columns = list(data.keys())
+    except Exception:
+        return [], []
+
+    if not columns and preview:
+        for row in preview:
+            for key in row.keys():
+                if key not in columns:
+                    columns.append(key)
+    return columns, preview
+
+
 async def process_upload(filename: str, content: bytes) -> DatasetMeta:
     """Save uploaded file, detect format, validate, return metadata."""
     dataset_id = str(uuid.uuid4())[:8]
@@ -162,8 +215,10 @@ async def process_upload(filename: str, content: bytes) -> DatasetMeta:
 
     fmt = detect_format(file_path)
     total_rows, valid_rows, issues = validate_dataset(file_path, fmt)
+    columns, preview_rows = _preview_rows(file_path, fmt)
+    validation_status = "valid" if total_rows > 0 and total_rows == valid_rows and not issues else "invalid" if issues else "unknown"
 
-    return DatasetMeta(
+    meta = DatasetMeta(
         id=dataset_id,
         filename=filename,
         format=fmt,
@@ -173,4 +228,12 @@ async def process_upload(filename: str, content: bytes) -> DatasetMeta:
         size_bytes=len(content),
         issues=issues,
         created_at=datetime.now(timezone.utc),
+        columns=columns,
+        validation_status=validation_status,
+        preview_rows=preview_rows,
+        source="upload",
+        validation_message=("Validation passed" if validation_status == "valid" else "Validation issues found" if issues else "No validation performed"),
     )
+
+    save_dataset_record(meta)
+    return meta

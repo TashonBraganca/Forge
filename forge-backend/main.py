@@ -22,6 +22,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("forge")
 
+# Suppress noisy per-request logs — only show warnings/errors from these
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -31,7 +36,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Create data directories
     settings.ensure_dirs()
-    logger.info(f"Data directories: datasets={settings.datasets_dir}, models={settings.models_dir}")
+    logger.info(
+        "Data directories: datasets=%s, models=%s, jobs=%s, db=%s",
+        settings.datasets_dir,
+        settings.models_dir,
+        settings.jobs_dir,
+        settings.database_path,
+    )
+
+    from services.persistence import init_database, recover_incomplete_jobs, bootstrap_summary
+    from services.training_service import restore_runtime_jobs
+
+    db_ready = init_database()
+    recover_incomplete_jobs()
+    restore_runtime_jobs()
 
     # Detect GPU (NVIDIA or Apple Silicon)
     from services.hardware_service import _get_gpu_info
@@ -43,13 +61,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         logger.warning("No GPU detected — training will be CPU-only")
 
-    # Check Ollama
-    from services.ollama_service import check_ollama_running
+    # Check Ollama and auto-start it when possible
+    from services.ollama_service import ensure_ollama_running
 
-    if await check_ollama_running():
+    if await ensure_ollama_running():
         logger.info(f"Ollama connected at {settings.ollama_base_url}")
     else:
         logger.warning(f"Ollama not reachable at {settings.ollama_base_url}")
+
+    logger.info("Startup summary: %s", bootstrap_summary(db_ready=db_ready))
 
     logger.info(f"Forge Backend ready at http://{settings.forge_host}:{settings.forge_port}")
 
@@ -90,3 +110,15 @@ app.include_router(models_router, prefix="/api")
 app.include_router(datasets_router, prefix="/api")
 app.include_router(training_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "main:app",
+        host=settings.forge_host,
+        port=settings.forge_port,
+        reload=False,
+        log_level="info",
+    )

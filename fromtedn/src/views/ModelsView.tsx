@@ -1,164 +1,158 @@
+import { useEffect, useMemo, useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { useModelStore } from '../store/models';
-import { motion } from 'framer-motion';
-import { useMemo, useState } from 'react';
-
-function Sparkline({ data, color = 'var(--color-forge-orange)' }: { data: number[]; color?: string }) {
-  const W = 120, H = 36;
-  const path = useMemo(() => {
-    if (data.length < 2) return '';
-    const max = Math.max(...data), min = Math.min(...data);
-    const range = max - min || 1;
-    const pts = data.map((v, i) => ({
-      x: (i / (data.length - 1)) * W,
-      y: 4 + (1 - (v - min) / range) * (H - 8),
-    }));
-    let d = `M ${pts[0].x},${pts[0].y}`;
-    for (let i = 1; i < pts.length; i++) {
-      const cx = (pts[i - 1].x + pts[i].x) / 2;
-      d += ` C ${cx},${pts[i - 1].y} ${cx},${pts[i].y} ${pts[i].x},${pts[i].y}`;
-    }
-    return d;
-  }, [data]);
-
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-[120px] h-[36px]" preserveAspectRatio="none">
-      <defs>
-        <linearGradient id="sg" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={color} stopOpacity="0.2" /><stop offset="100%" stopColor={color} stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      {path && <>
-        <path d={`${path} L ${W},${H} L 0,${H} Z`} fill="url(#sg)" />
-        <path d={path} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" className="glow-forge" />
-      </>}
-    </svg>
-  );
-}
-
-const SAMPLE_LOSS_CURVES = [
-  [1.5, 1.3, 1.1, 0.95, 0.82, 0.71, 0.63, 0.58, 0.54, 0.51, 0.49, 0.47, 0.45],
-  [1.8, 1.6, 1.4, 1.2, 1.0, 0.88, 0.76, 0.68, 0.61, 0.56, 0.52],
-  [1.2, 1.1, 0.9, 0.78, 0.65, 0.55, 0.48, 0.43, 0.40, 0.38, 0.36, 0.35, 0.34, 0.33],
-];
+import { api } from '../lib/api';
+import { Loader2, CheckCircle2, CircleAlert, Cpu } from 'lucide-react';
 
 export default function ModelsView() {
   const fineTunedModels = useModelStore((s) => s.fineTunedModels);
+  const fetchRegistryModels = useModelStore((s) => s.fetchRegistryModels);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [actionBusyId, setActionBusyId] = useState<string | null>(null);
 
-  const demoModels = fineTunedModels.length > 0 ? fineTunedModels : [
-    { id: 'ft-001', name: 'forge-llama3.2-support', baseModel: 'llama3.2:3b', method: 'qlora', finalLoss: 0.45, date: '2026-04-20', lossData: SAMPLE_LOSS_CURVES[0] },
-    { id: 'ft-002', name: 'forge-mistral-code', baseModel: 'mistral:7b', method: 'lora', finalLoss: 0.52, date: '2026-04-18', lossData: SAMPLE_LOSS_CURVES[1] },
-    { id: 'ft-003', name: 'forge-phi3-medical', baseModel: 'phi3:mini', method: 'qlora', finalLoss: 0.33, date: '2026-04-15', lossData: SAMPLE_LOSS_CURVES[2] },
-  ];
+  useEffect(() => {
+    fetchRegistryModels();
+  }, [fetchRegistryModels]);
 
-  const selected = demoModels.find((m) => m.id === selectedId);
+  const selected = useMemo(
+    () => fineTunedModels.find((model) => model.id === selectedId) || null,
+    [fineTunedModels, selectedId],
+  );
+
+  const handleExport = async (jobId: string, defaultName: string) => {
+    const suggestedName = `forge-${defaultName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+    const ollamaModelName = prompt('Enter a name for the exported Ollama model:', suggestedName);
+    if (!ollamaModelName) return; // User cancelled
+
+    setActionBusyId(jobId);
+    try {
+      await api.exportModel(jobId, ollamaModelName);
+      // It takes a while, so we might want to poll or just refetch immediately
+      await fetchRegistryModels();
+    } finally {
+      setActionBusyId(null);
+    }
+  };
 
   return (
     <div className="w-full max-w-6xl mx-auto px-6 py-8">
-      <div className="flex items-baseline justify-between mb-8">
-        <h1 className="font-display text-2xl font-bold text-white">Forged Models</h1>
-        <span className="font-mono text-[11px] text-[#555]">{demoModels.length} model(s)</span>
+      <div className="flex items-center justify-between mb-8">
+        <div>
+          <h1 className="font-display text-2xl font-bold text-white">Forged Models</h1>
+          <p className="font-mono text-[11px] text-[#666] mt-1">Persisted registry of trained and exported artifacts</p>
+        </div>
+        <span className="font-mono text-[11px] text-[#555]">{fineTunedModels.length} record(s)</span>
       </div>
 
-      <div className={`grid gap-6 ${selected ? 'grid-cols-[1fr_1.2fr]' : 'grid-cols-1'}`}>
-        <div className="space-y-4">
-          {demoModels.map((model, i) => {
-            const isSel = selectedId === model.id;
-            const lossCurve = 'lossData' in model ? (model as { lossData: number[] }).lossData : SAMPLE_LOSS_CURVES[i % 3];
-            return (
-              <motion.div
-                key={model.id}
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: i * 0.05 }}
-                onClick={() => setSelectedId(isSel ? null : model.id)}
-                className={`cursor-pointer transition-all p-5 rounded-xl border ${
-                  isSel ? 'bg-[rgba(255,85,0,0.04)] border-[rgba(255,85,0,0.2)] shadow-[0_0_20px_rgba(255,85,0,0.05)]' : 'forge-card hover:border-[rgba(255,85,0,0.15)]'
-                }`}
-              >
-                <div className="flex items-start justify-between">
-                  <div className="flex-1 pr-4">
-                    <h3 className="font-display text-[15px] font-bold text-[#eee] mb-3">{model.name}</h3>
-                    <div className="flex items-center gap-3 flex-wrap">
-                      <span className="font-mono text-[10px] text-[#666] bg-[rgba(255,255,255,0.03)] px-2 py-1 rounded">{model.baseModel}</span>
-                      <span className="font-display text-[11px] font-bold text-[var(--color-forge-amber)]">{model.method.toUpperCase()}</span>
-                      <span className="font-mono text-[10px] text-[#888]">{model.date}</span>
+      {fineTunedModels.length === 0 ? (
+        <div className="forge-card p-10 text-center">
+          <Cpu size={32} className="mx-auto text-[var(--color-forge-orange)] mb-4" />
+          <h2 className="font-display text-xl font-semibold text-white mb-2">No forged models yet</h2>
+          <p className="font-mono text-[12px] text-[#666]">Train a model, then export it to make it appear here.</p>
+        </div>
+      ) : (
+        <div className={`grid gap-6 ${selected ? 'grid-cols-1 lg:grid-cols-[1fr_1.05fr]' : 'grid-cols-1'}`}>
+          <div className="space-y-4">
+            {fineTunedModels.map((model, index) => {
+              const isSelected = selectedId === model.id;
+              const isRunnable = Boolean(model.ollamaModelName);
+              return (
+                <motion.button
+                  key={model.id}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: index * 0.04 }}
+                  onClick={() => setSelectedId(isSelected ? null : model.id)}
+                  className={`w-full text-left transition-all p-5 rounded-xl border ${
+                    isSelected
+                      ? 'bg-[rgba(255,85,0,0.05)] border-[rgba(255,85,0,0.18)] shadow-[0_0_20px_rgba(255,85,0,0.05)]'
+                      : 'forge-card hover:border-[rgba(255,85,0,0.12)]'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0 flex-1">
+                      <h3 className="font-display text-[15px] font-bold text-[#eee] truncate mb-2">{model.name}</h3>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-mono text-[10px] text-[#666] bg-[rgba(255,255,255,0.03)] px-2 py-1 rounded">{model.baseModel}</span>
+                        <span className="font-display text-[11px] font-bold text-[var(--color-forge-amber)]">{model.method.toUpperCase()}</span>
+                        <span className="font-mono text-[10px] text-[#888]">{model.date.slice(0, 10)}</span>
+                      </div>
                     </div>
-                  </div>
-                  <div className="flex items-center gap-4 shrink-0">
-                    <div className="hidden sm:block"><Sparkline data={lossCurve} /></div>
-                    <div className="text-right">
-                      <div className="font-display text-[22px] font-bold text-[var(--color-forge-amber)]">{model.finalLoss.toFixed(2)}</div>
+                    <div className="text-right shrink-0">
+                      <div className="font-display text-[18px] font-bold text-[var(--color-forge-amber)]">
+                        {model.finalLoss !== null && model.finalLoss !== undefined ? model.finalLoss.toFixed(4) : '—'}
+                      </div>
                       <div className="font-mono text-[9px] tracking-widest text-[#555]">FINAL LOSS</div>
                     </div>
                   </div>
+
+                  <div className="mt-4 flex items-center gap-2 flex-wrap">
+                    <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-mono border ${model.exportStatus === 'completed' ? 'border-green-500/20 text-green-500 bg-green-500/5' : model.exportStatus === 'running' ? 'border-[var(--color-forge-orange)]/20 text-[var(--color-forge-orange)] bg-[rgba(255,85,0,0.06)]' : 'border-[rgba(255,255,255,0.05)] text-[#777] bg-[rgba(255,255,255,0.02)]'}` }>
+                      {model.exportStatus === 'completed' ? <CheckCircle2 size={10} /> : model.exportStatus === 'failed' ? <CircleAlert size={10} /> : <Loader2 size={10} className={model.exportStatus === 'running' ? 'animate-spin' : ''} />}
+                      {model.exportStatus.toUpperCase()}
+                    </span>
+                    {isRunnable && (
+                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-mono border border-green-500/20 text-green-500 bg-green-500/5">
+                        Runnable in Ollama
+                      </span>
+                    )}
+                    <span className="font-mono text-[10px] text-[#666]">artifact: {model.exportFormat}</span>
+                  </div>
+                </motion.button>
+              );
+            })}
+          </div>
+
+          <AnimatePresence mode="wait">
+            {selected && (
+              <motion.div
+                key={selected.id}
+                initial={{ opacity: 0, x: 18 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: 18 }}
+                className="forge-card p-6 self-start sticky top-20"
+              >
+                <h2 className="font-display text-xl font-bold text-white mb-2">{selected.name}</h2>
+                <p className="font-mono text-[11px] text-[#666] mb-6">Base model: {selected.baseModel}</p>
+
+                <div className="space-y-4 mb-8">
+                  {[
+                    ['Method', selected.method.toUpperCase()],
+                    ['Status', selected.status],
+                    ['Export Status', selected.exportStatus],
+                    ['Export Format', selected.exportFormat],
+                    ['Artifact Path', selected.artifactPath || '—'],
+                    ['Ollama Model', selected.ollamaModelName || '—'],
+                  ].map(([label, value]) => (
+                    <div key={label} className="flex justify-between gap-4 py-2 border-b border-[rgba(255,255,255,0.03)] last:border-0">
+                      <span className="font-body text-[13px] text-[#666]">{label}</span>
+                      <span className="font-mono text-[13px] text-[#ccc] text-right break-all">{value}</span>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex gap-3">
+                  {selected.exportStatus !== 'completed' && (
+                    <button
+                      onClick={() => handleExport(selected.jobId, selected.name)}
+                      disabled={actionBusyId === selected.jobId}
+                      className="flex-1 h-10 rounded-lg bg-gradient-to-br from-[var(--color-forge-ember)] to-[var(--color-forge-orange)] text-black font-display text-[11px] font-bold tracking-widest disabled:opacity-60"
+                    >
+                      {actionBusyId === selected.jobId ? 'EXPORTING' : 'EXPORT'}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => setSelectedId(null)}
+                    className="flex-1 h-10 rounded-lg bg-[rgba(255,255,255,0.02)] border border-[rgba(255,255,255,0.06)] text-[#aaa] font-display text-[11px] font-bold tracking-widest hover:bg-[rgba(255,255,255,0.05)] transition-colors"
+                  >
+                    CLOSE
+                  </button>
                 </div>
               </motion.div>
-            );
-          })}
+            )}
+          </AnimatePresence>
         </div>
-
-        {selected && (
-          <motion.div
-            initial={{ opacity: 0, x: 20 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 20 }}
-            className="forge-card p-6 sticky top-20 self-start"
-          >
-            <h2 className="font-display text-xl font-bold text-white mb-6">{selected.name}</h2>
-
-            <div className="mb-8">
-              <p className="font-display text-[11px] font-semibold uppercase tracking-widest text-[#555] mb-3">Training Curve</p>
-              <div className="h-[140px] bg-[rgba(0,0,0,0.3)] rounded-lg py-2 border border-[rgba(255,255,255,0.03)] overflow-hidden">
-                <svg viewBox="0 0 300 100" className="w-full h-full" preserveAspectRatio="none">
-                  <defs>
-                    <linearGradient id="detailFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="rgba(255,85,0,0.2)" /><stop offset="100%" stopColor="rgba(0,0,0,0)" />
-                    </linearGradient>
-                  </defs>
-                  {(() => {
-                    const d = 'lossData' in selected ? (selected as { lossData: number[] }).lossData : SAMPLE_LOSS_CURVES[0];
-                    const max = Math.max(...d), min = Math.min(...d), range = max - min || 1;
-                    const pts = d.map((v, i) => ({ x: (i / (d.length - 1)) * 300, y: 8 + (1 - (v - min) / range) * 84 }));
-                    let path = `M ${pts[0].x},${pts[0].y}`;
-                    for (let i = 1; i < pts.length; i++) { const cx = (pts[i-1].x + pts[i].x) / 2; path += ` C ${cx},${pts[i-1].y} ${cx},${pts[i].y} ${pts[i].x},${pts[i].y}`; }
-                    return <>
-                      <path d={`${path} L 300,100 L 0,100 Z`} fill="url(#detailFill)" />
-                      <path d={path} fill="none" stroke="var(--color-forge-orange)" strokeWidth="2" strokeLinecap="round" className="glow-forge" />
-                    </>;
-                  })()}
-                </svg>
-              </div>
-            </div>
-
-            <div className="space-y-4 mb-8">
-              {[
-                ['Base Model', selected.baseModel],
-                ['Method', selected.method.toUpperCase()],
-                ['Final Loss', selected.finalLoss.toFixed(4)],
-                ['Date', selected.date],
-              ].map(([k, v]) => (
-                <div key={k} className="flex justify-between py-2 border-b border-[rgba(255,255,255,0.03)] last:border-0">
-                  <span className="font-body text-[13px] text-[#666]">{k}</span>
-                  <span className="font-mono text-[13px] text-[#ccc]">{v}</span>
-                </div>
-              ))}
-            </div>
-
-            <div className="flex gap-3">
-              <button className="flex-1 h-10 rounded-lg bg-[rgba(255,85,0,0.08)] border border-[rgba(255,85,0,0.15)] text-[var(--color-forge-orange)] font-display text-[11px] font-bold tracking-widest hover:bg-[rgba(255,85,0,0.12)] transition-colors">
-                TEST
-              </button>
-              <button className="flex-1 h-10 rounded-lg bg-[rgba(255,255,255,0.02)] border border-[rgba(255,255,255,0.06)] text-[#aaa] font-display text-[11px] font-bold tracking-widest hover:bg-[rgba(255,255,255,0.05)] transition-colors">
-                EXPORT
-              </button>
-              <button className="flex-1 h-10 rounded-lg bg-transparent border border-[rgba(239,68,68,0.2)] text-red-500 font-display text-[11px] font-bold tracking-widest hover:bg-[rgba(239,68,68,0.05)] transition-colors">
-                DELETE
-              </button>
-            </div>
-          </motion.div>
-        )}
-      </div>
+      )}
     </div>
   );
 }

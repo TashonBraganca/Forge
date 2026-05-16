@@ -1,0 +1,12 @@
+{
+  "3a5cbf69": {
+    "columns": {
+      "prompt": "instruction",
+      "query": null,
+      "response": "output"
+    },
+    "file_name": "3a5cbf69_forge-dataset-XXXX.jsonl",
+    "formatting": "alpaca",
+    "split": "train"
+  }
+}

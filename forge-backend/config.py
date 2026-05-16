@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     forge_host: str = "localhost"
     forge_port: int = 8421
 
+    database_path: Path = Path.home() / "forge" / "forge.db"
+
     llamafactory_dir: Path = Path.home() / "LLaMA-Factory"
     llamacpp_dir: Path = Path.home() / "llama.cpp"
 
@@ -26,11 +28,14 @@ class Settings(BaseSettings):
     # Frontend origin for CORS
     frontend_origin: str = "http://localhost:3004"
 
+    # Simulation fallback for missing training backend dependencies
+    allow_simulation_fallback: bool = True
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     def ensure_dirs(self) -> None:
         """Create all data directories if they do not exist."""
-        for d in (self.datasets_dir, self.models_dir, self.jobs_dir):
+        for d in (self.database_path.parent, self.datasets_dir, self.models_dir, self.jobs_dir):
             d.mkdir(parents=True, exist_ok=True)
 
 

@@ -1,9 +1,10 @@
 import { create } from 'zustand';
 import type { TrainingStatus, TrainingConfig, LogEntry } from '../types';
 import type { HardwareStats } from '../lib/api';
-import { generateLogEntry } from '../lib/mock-data';
+import { createSimState, advanceSimulation } from '../lib/mock-data';
+import type { SimulationState } from '../lib/mock-data';
 import { api, checkBackendConnection } from '../lib/api';
-import type { TrainingEvent } from '../lib/api';
+import type { TrainingEvent, TrainingJob as ApiTrainingJob } from '../lib/api';
 
 interface TrainingStore {
   status: TrainingStatus;
@@ -29,6 +30,10 @@ interface TrainingStore {
   eventSource: EventSource | null;
   hwStats: HardwareStats | null;
   hwPollInterval: ReturnType<typeof setInterval> | null;
+  exportStatus: 'not_started' | 'pending' | 'running' | 'completed' | 'failed';
+  exportProgress: number;
+  exportModelName: string | null;
+  simState: SimulationState | null;
 
   setSelectedModel: (id: string) => void;
   updateConfig: (patch: Partial<TrainingConfig>) => void;
@@ -40,6 +45,7 @@ interface TrainingStore {
   pollHardware: () => Promise<void>;
   startHwPoll: () => void;
   stopHwPoll: () => void;
+  exportModel: (ollamaModelName: string) => Promise<void>;
 }
 
 const DEFAULT_CONFIG: TrainingConfig = {
@@ -53,6 +59,183 @@ const DEFAULT_CONFIG: TrainingConfig = {
   dataset: 'alpaca_52k.jsonl',
 };
 
+const INITIAL_STATE = {
+  selectedModel: '',
+  config: DEFAULT_CONFIG,
+  status: 'idle' as const,
+  currentStep: 0,
+  totalSteps: 0,
+  progress: 0,
+  currentEpoch: 0,
+  totalEpochs: 0,
+  currentLoss: 0,
+  lossHistory: [],
+  gpuTemp: 0,
+  gpuUtil: 0,
+  vramUtil: 0,
+  cpuUtil: 0,
+  ramUtil: 0,
+  logs: [],
+  simulationInterval: null,
+  logIndex: 0,
+  activeJobId: null,
+  eventSource: null,
+  hwStats: null,
+  hwPollInterval: null,
+  exportStatus: 'not_started' as const,
+  exportProgress: 0,
+  exportModelName: null,
+  simState: null,
+};
+
+function mapEventType(message: string): LogEntry['type'] {
+  const msg = message.toLowerCase();
+  if (msg.includes('error:') || msg.includes('exception:') || msg.includes('traceback')) return 'error';
+  if (msg.includes('warn') || msg.includes('warning:')) return 'warn';
+  if (msg.includes('loss=') || msg.includes('train_loss')) return 'metrics';
+  return 'info';
+}
+
+function hydrateJobIntoStore(set: (partial: Partial<TrainingStore> | ((state: TrainingStore) => Partial<TrainingStore>)) => void, job: ApiTrainingJob) {
+  const status: TrainingStatus =
+    job.status === 'complete' ? 'completed' :
+    job.status === 'failed' ? 'failed' :
+    job.status === 'cancelled' ? 'idle' :
+    job.status === 'queued' ? 'preparing' :
+    job.status === 'preparing' ? 'preparing' : 'training';
+
+  set({
+    status,
+    selectedModel: job.config.model_name,
+    config: {
+      method: job.config.method,
+      loraRank: job.config.lora_rank ?? 16,
+      loraAlpha: job.config.lora_alpha ?? 32,
+      epochs: job.config.epochs ?? 3,
+      learningRate: String(job.config.learning_rate ?? 2e-4),
+      batchSize: job.config.batch_size ?? 4,
+      seqLength: job.config.max_length ?? 2048,
+      dataset: job.config.dataset_id,
+    },
+    progress: job.progress ?? 0,
+    currentLoss: job.final_loss ?? 0,
+    lossHistory: job.loss_history ?? [],
+    currentEpoch: job.current_epoch ?? 0,
+    totalEpochs: job.config.epochs ?? 3,
+    currentStep: job.current_step ?? 0,
+    totalSteps: job.total_steps ?? 0,
+    logs: (job.latest_logs ?? []).map((message, index) => ({
+      id: `restored-${job.job_id}-${index}`,
+      timestamp: new Date(job.created_at).toLocaleTimeString('en-GB'),
+      type: mapEventType(message),
+      message,
+    })),
+    backendConnected: true,
+    activeJobId: job.status === 'training' || job.status === 'preparing' || job.status === 'queued' ? job.job_id : null,
+    exportStatus: job.export_status as any,
+    exportModelName: job.export_model_name,
+  });
+}
+
+function subscribeToTrainingStream(
+  set: (partial: Partial<TrainingStore> | ((state: TrainingStore) => Partial<TrainingStore>)) => void,
+  get: () => TrainingStore,
+  jobId: string,
+  onComplete?: () => void,
+) {
+  return api.streamTraining(
+    jobId,
+    (event: TrainingEvent) => {
+      const s = get();
+
+      // Determine if this is really a fatal error or just a warning coming through as 'error' type
+      const isTrulyFatal = event.type === 'error' && event.level === 'ERROR' &&
+        !(event.message || '').includes('FutureWarning') &&
+        !(event.message || '').includes('UserWarning') &&
+        !(event.message || '').includes('DeprecationWarning') &&
+        !(event.message || '').includes('NOTE:');
+
+      const logType: LogEntry['type'] = isTrulyFatal ? 'error' :
+        event.type === 'error' ? 'warn' :
+        event.type === 'metrics' ? 'metrics' : 'info';
+
+      const newLog: LogEntry = {
+        id: `log-${Date.now()}-${Math.random()}`,
+        timestamp: new Date().toLocaleTimeString('en-GB'),
+        type: logType,
+        message: event.message || '',
+      };
+
+      if (event.type === 'metrics' && event.loss !== null) {
+        set({
+          currentLoss: event.loss,
+          lossHistory: [...s.lossHistory, event.loss],
+          currentEpoch: typeof event.epoch === 'number' ? Math.floor(event.epoch) : s.currentEpoch,
+          logs: [...s.logs, newLog],
+        });
+      } else if (event.type === 'progress' && event.step !== null) {
+        const isExport = s.exportStatus !== 'not_started';
+        if (isExport) {
+          // This is an export progress event
+          const progress = event.total_steps ? (event.step / event.total_steps) * 100 : 0;
+          set({ exportProgress: progress, logs: [...s.logs, newLog] });
+        } else {
+          // This is a training progress event
+          const totalSteps = event.total_steps || s.totalSteps;
+          const progress = totalSteps > 0 ? (event.step / totalSteps) * 100 : 0;
+          set({
+            status: 'training',
+            currentStep: event.step,
+            totalSteps,
+            progress,
+            logs: [...s.logs, newLog],
+          });
+        }
+      } else if (event.type === 'complete') {
+        const isExport = event.message?.includes('Export');
+        if (isExport) {
+          set({ exportStatus: 'completed', logs: [...s.logs, newLog] });
+        } else {
+          set({ status: 'completed', progress: 100, currentEpoch: s.totalEpochs, logs: [...s.logs, newLog] });
+        }
+        onComplete?.();
+      } else if (isTrulyFatal) {
+        console.error(`[STORE] ❌ Training error: ${event.message}`);
+        const isExport = event.message?.includes('Export');
+        if (isExport) {
+          set({ exportStatus: 'failed', logs: [...s.logs, newLog] });
+        } else {
+          set({ status: 'failed', logs: [...s.logs, newLog] });
+        }
+      } else {
+        // Non-fatal log line (warnings, info, etc.) — just append to logs
+        const updates: Partial<TrainingStore> = { logs: [...s.logs, newLog] };
+        if (event.message?.includes('Starting export pipeline')) {
+            updates.exportStatus = 'running';
+        }
+        if (event.message?.includes('Phase 4/4')) {
+            // Ollama import phase
+            updates.exportProgress = 90;
+        }
+        if (event.message?.includes('✅ Export pipeline completed successfully!')) {
+            updates.exportStatus = 'completed';
+            updates.exportProgress = 100;
+        }
+        if (event.message?.includes('❌ Export failed:')) {
+            updates.exportStatus = 'failed';
+        }
+        set(updates);
+      }
+    },
+    () => {
+      const s = get();
+      if (s.status !== 'completed' && s.status !== 'failed' && s.exportStatus !== 'completed' && s.exportStatus !== 'failed') {
+        console.error('[STORE] ❌ SSE connection error — falling back to simulation');
+      }
+    },
+  );
+}
+
 export const useTrainingStore = create<TrainingStore>((set, get) => ({
   status: 'idle',
   selectedModel: 'llama3.2:3b',
@@ -63,7 +246,7 @@ export const useTrainingStore = create<TrainingStore>((set, get) => ({
   currentEpoch: 0,
   totalEpochs: 3,
   currentStep: 0,
-  totalSteps: 2436,
+  totalSteps: 0,
   gpuTemp: 45,
   gpuUtil: 0,
   vramUtil: 0,
@@ -77,6 +260,10 @@ export const useTrainingStore = create<TrainingStore>((set, get) => ({
   eventSource: null,
   hwStats: null,
   hwPollInterval: null,
+  exportStatus: 'not_started',
+  exportProgress: 0,
+  exportModelName: null,
+  simState: null,
 
   setSelectedModel: (id) => {
     console.log('[STORE] Model selected:', id);
@@ -92,6 +279,18 @@ export const useTrainingStore = create<TrainingStore>((set, get) => ({
     set({ backendConnected: connected });
     if (connected) {
       get().startHwPoll();
+      api.getJobs()
+        .then((jobs) => {
+          const active = jobs.find((job) => job.status === 'training' || job.status === 'preparing' || job.status === 'queued');
+          if (active) {
+            hydrateJobIntoStore(set, active);
+            const es = subscribeToTrainingStream(set, get, active.job_id);
+            set({ eventSource: es, activeJobId: active.job_id });
+          }
+        })
+        .catch(() => {
+          // Keep the UI usable even if the job list is temporarily unavailable.
+        });
     }
   },
 
@@ -118,9 +317,7 @@ export const useTrainingStore = create<TrainingStore>((set, get) => ({
     const { hwPollInterval, pollHardware } = get();
     if (hwPollInterval) return;
     pollHardware();
-    const interval = setInterval(() => get().pollHardware(), 2000);
-    set({ hwPollInterval: interval });
-    console.log('[STORE] Hardware polling started (2s)');
+    console.log('[STORE] Hardware status fetched once (polling disabled)');
   },
 
   stopHwPoll: () => {
@@ -131,29 +328,48 @@ export const useTrainingStore = create<TrainingStore>((set, get) => ({
 
   startTraining: () => {
     const state = get();
-    if (!state.selectedModel) return;
+    if (!state.selectedModel) {
+      console.warn('[STORE] ⚠️ Cannot start training — no model selected');
+      return;
+    }
 
-    console.log('[STORE] Starting training', { model: state.selectedModel, config: state.config });
+    console.log(
+      `[STORE] 🔥 Starting training\n` +
+      `  Model:         ${state.selectedModel}\n` +
+      `  Method:        ${state.config.method}\n` +
+      `  Dataset:       ${state.config.dataset}\n` +
+      `  Epochs:        ${state.config.epochs}\n` +
+      `  Batch Size:    ${state.config.batchSize}\n` +
+      `  Learning Rate: ${state.config.learningRate}\n` +
+      `  LoRA Rank:     ${state.config.loraRank}\n` +
+      `  LoRA Alpha:    ${state.config.loraAlpha}\n` +
+      `  Seq Length:    ${state.config.seqLength}\n` +
+      `  Backend:       ${state.backendConnected ? '✓ connected' : '✗ offline'}`
+    );
 
     set({
       status: 'preparing',
       progress: 0,
-      currentLoss: 1.55,
-      lossHistory: [1.55],
-      currentEpoch: 1,
+      currentLoss: 0,
+      lossHistory: [],
+      currentEpoch: 0,
+      totalEpochs: state.config.epochs,
       currentStep: 0,
-      logs: [],
+      totalSteps: 0,
+      exportStatus: 'not_started',
+      exportModelName: null,
+      logs: [{
+        id: `log-start-${Date.now()}`,
+        timestamp: new Date().toLocaleTimeString('en-GB'),
+        type: 'info' as const,
+        message: `Starting training: ${state.selectedModel} | ${state.config.method.toUpperCase()} | ${state.config.epochs} epochs | batch=${state.config.batchSize} | lr=${state.config.learningRate}`,
+      }],
       logIndex: 0,
-      gpuUtil: 12,
-      vramUtil: 45,
-      cpuUtil: 15,
-      ramUtil: 22,
-      gpuTemp: 52,
     });
 
     if (state.backendConnected) {
-      console.log('[STORE] Attempting real training via backend...');
-      api.startTraining({
+      console.log('[STORE] 📡 Sending training request to backend...');
+      const trainingConfig = {
         model_name: state.selectedModel,
         dataset_id: state.config.dataset,
         method: state.config.method,
@@ -163,139 +379,143 @@ export const useTrainingStore = create<TrainingStore>((set, get) => ({
         learning_rate: parseFloat(state.config.learningRate),
         batch_size: state.config.batchSize,
         max_length: state.config.seqLength,
-      })
-        .then((response: { job_id: string | null; mode?: string }) => {
-          if (response.mode === 'simulation' || !response.job_id) {
-            console.log('[STORE] Backend says use simulation (LLaMA-Factory not installed)');
-            get().startSimulation();
+      };
+      console.log('[STORE] Training config payload:', trainingConfig);
+
+      api.startTraining(trainingConfig)
+        .then((response) => {
+          if (!response.job_id) {
+            console.error('[STORE] ❌ Backend did not return a job id — response:', response);
             return;
           }
 
-          console.log('[STORE] ✓ Training job started:', response.job_id);
-          set({ activeJobId: response.job_id, status: 'training' });
-
-          const es = api.streamTraining(
-            response.job_id,
-            (event: TrainingEvent) => {
-              const s = get();
-              const newLog: LogEntry = {
-                id: `log-${Date.now()}-${Math.random()}`,
-                timestamp: new Date().toLocaleTimeString('en-GB'),
-                type: event.type === 'error' ? 'error' : event.type === 'metrics' ? 'metrics' : 'info',
-                message: event.message || '',
-              };
-
-              if (event.type === 'metrics' && event.loss !== null) {
-                set({
-                  currentLoss: event.loss,
-                  lossHistory: [...s.lossHistory, event.loss],
-                  logs: [...s.logs, newLog],
-                });
-              } else if (event.type === 'progress' && event.step !== null) {
-                const totalSteps = event.total_steps || s.totalSteps;
-                const progress = (event.step / totalSteps) * 100;
-                set({
-                  currentStep: event.step,
-                  totalSteps,
-                  progress,
-                  logs: [...s.logs, newLog],
-                });
-              } else if (event.type === 'complete') {
-                set({
-                  status: 'completed',
-                  progress: 100,
-                  logs: [...s.logs, newLog],
-                });
-                es.close();
-              } else if (event.type === 'error') {
-                console.error('[STORE] Training error:', event.message);
-                set({ logs: [...s.logs, newLog] });
-              } else {
-                set({ logs: [...s.logs, newLog] });
-              }
-            },
-            () => {
-              console.error('[STORE] SSE error, falling back to simulation');
-              get().startSimulation();
-            },
+          console.log(
+            `[STORE] ✓ Training job created:\n` +
+            `  Job ID: ${response.job_id}\n` +
+            `  Mode:   ${response.mode}\n` +
+            `  Msg:    ${response.message || 'none'}`
           );
-
+          set({ activeJobId: response.job_id, status: 'training' });
+          console.log(`[STORE] 📡 Subscribing to SSE stream for job ${response.job_id}...`);
+          const es = subscribeToTrainingStream(set, get, response.job_id);
           set({ eventSource: es });
         })
         .catch((err) => {
-          console.warn('[STORE] Backend training failed, falling back to simulation:', err.message);
+          console.warn(`[STORE] ⚠️ Backend training failed: ${err.message}`);
+          console.warn('[STORE] Falling back to simulation mode');
           get().startSimulation();
         });
     } else {
-      console.log('[STORE] Backend offline — running simulation');
+      console.log('[STORE] 🔄 Backend offline — running simulation');
       get().startSimulation();
     }
   },
 
+  exportModel: async (ollamaModelName: string) => {
+    const { activeJobId, backendConnected } = get();
+
+    // ── Simulation export (backend offline or simulation job)
+    if (!backendConnected || (activeJobId && activeJobId.startsWith('sim-'))) {
+      console.log('[STORE] 🔄 Simulating export pipeline...');
+      set({ exportStatus: 'pending', exportModelName: ollamaModelName });
+
+      const simExportLogs = [
+        'Starting export pipeline...',
+        'Phase 1/4: Merging LoRA adapters with base model...',
+        'Phase 2/4: Converting to GGUF using llama.cpp...',
+        'Phase 3/4: Quantizing to Q4_K_M...',
+        `Phase 4/4: Importing to Ollama as '${ollamaModelName}'...`,
+        '✅ Export pipeline completed successfully!',
+      ];
+
+      set({ exportStatus: 'running' });
+      let i = 0;
+      const exportInterval = setInterval(() => {
+        const s = get();
+        if (i >= simExportLogs.length) {
+          clearInterval(exportInterval);
+          set({ exportStatus: 'completed' });
+          return;
+        }
+        const msg = simExportLogs[i];
+        const newLog: LogEntry = {
+          id: `log-export-${Date.now()}-${i}`,
+          timestamp: new Date().toLocaleTimeString('en-GB'),
+          type: 'info',
+          message: msg,
+        };
+        set({ logs: [...s.logs, newLog] });
+        i++;
+      }, 1200);
+      return;
+    }
+
+    // ── Real backend export
+    if (!activeJobId) return;
+
+    try {
+      set({ exportStatus: 'pending', exportModelName: ollamaModelName });
+      await api.exportModel(activeJobId, ollamaModelName);
+      
+      // Re-subscribe to the stream to see the export logs
+      const es = subscribeToTrainingStream(set, get, activeJobId);
+      set({ eventSource: es });
+    } catch (err) {
+      console.error('[STORE] Export error:', err);
+      set({ exportStatus: 'failed' });
+    }
+  },
+
   startSimulation: () => {
+    const state = get();
+    const simId = `sim-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const simState = createSimState(state.config, state.selectedModel || 'llama3.2:3b');
+
+    set({
+      activeJobId: simId,
+      totalSteps: simState.totalSteps,
+      simState,
+    });
+
     setTimeout(() => {
       set({ status: 'training' });
-      console.log('[STORE] Simulation started');
+      console.log('[STORE] Simulation started — total steps:', simState.totalSteps);
 
       const interval = setInterval(() => {
         const s = get();
-        if (s.status !== 'training') return;
+        if (s.status !== 'training' || !s.simState) return;
 
-        const progressInc = 0.3 + Math.random() * 0.5;
-        const newProgress = Math.min(100, s.progress + progressInc);
-        const lossDecay = 0.003 + Math.random() * 0.008;
-        const newLoss = Math.max(0.22, s.currentLoss - lossDecay);
-        const newStep = Math.min(s.totalSteps, s.currentStep + Math.floor(Math.random() * 8) + 2);
-        const newEpoch = Math.floor(newProgress / (100 / s.totalEpochs)) + 1;
+        const result = advanceSimulation(s.simState);
 
-        let newLogs = s.logs;
-        let newLogIndex = s.logIndex;
-        if (Math.random() > 0.6) {
-          const entry = generateLogEntry(newLogIndex);
-          newLogs = [...s.logs, entry];
-          newLogIndex = s.logIndex + 1;
-        }
-
-        if (newProgress >= 100) {
+        if (result.done) {
           clearInterval(interval);
           console.log('[STORE] ✓ Simulation complete');
           set({
             status: 'completed',
             progress: 100,
-            currentLoss: newLoss,
-            lossHistory: [...s.lossHistory, newLoss],
-            currentEpoch: s.totalEpochs,
-            currentStep: s.totalSteps,
-            gpuUtil: s.backendConnected ? s.gpuUtil : 0,
-            vramUtil: s.backendConnected ? s.vramUtil : 18,
-            cpuUtil: s.backendConnected ? s.cpuUtil : 8,
-            gpuTemp: s.backendConnected ? s.gpuTemp : 48,
-            logs: [...newLogs, {
-              id: `log-done-${Date.now()}`,
-              timestamp: new Date().toLocaleTimeString('en-GB'),
-              type: 'info' as const,
-              message: '> Training complete. Model saved successfully.',
-            }],
+            currentLoss: result.loss ?? s.currentLoss,
+            lossHistory: result.loss != null ? [...s.lossHistory, result.loss] : s.lossHistory,
+            currentEpoch: result.epoch,
+            currentStep: result.totalSteps,
+            totalSteps: result.totalSteps,
+            logs: [...s.logs, result.log],
             simulationInterval: null,
           });
           return;
         }
 
+        const progress = result.totalSteps > 0 ? (result.step / result.totalSteps) * 100 : 0;
+
         set({
-          progress: newProgress,
-          currentLoss: newLoss,
-          lossHistory: [...s.lossHistory, newLoss],
-          currentEpoch: Math.min(newEpoch, s.totalEpochs),
-          currentStep: newStep,
-          ...(s.backendConnected ? {} : {
-            gpuTemp: 68 + Math.floor(Math.random() * 10),
-            gpuUtil: 82 + Math.floor(Math.random() * 15),
-            vramUtil: 72 + Math.floor(Math.random() * 12),
-            cpuUtil: 25 + Math.floor(Math.random() * 20),
-            ramUtil: 35 + Math.floor(Math.random() * 10),
-          }),
-          logs: newLogs,
-          logIndex: newLogIndex,
+          progress,
+          currentLoss: result.loss ?? s.currentLoss,
+          lossHistory: result.loss != null ? [...s.lossHistory, result.loss] : s.lossHistory,
+          currentEpoch: result.epoch,
+          currentStep: result.step,
+          totalSteps: result.totalSteps,
+          logs: [...s.logs, result.log],
+          logIndex: s.logIndex + 1,
+          simState: s.simState,
         });
       }, 800);
 
@@ -311,7 +531,7 @@ export const useTrainingStore = create<TrainingStore>((set, get) => ({
       state.eventSource.close();
     }
 
-    if (state.activeJobId && state.backendConnected) {
+    if (state.activeJobId && state.backendConnected && !state.activeJobId.startsWith('sim-')) {
       api.cancelTraining(state.activeJobId).catch((err) =>
         console.warn('[STORE] Backend cancel failed:', err.message)
       );
@@ -326,6 +546,7 @@ export const useTrainingStore = create<TrainingStore>((set, get) => ({
       simulationInterval: null,
       eventSource: null,
       activeJobId: null,
+      simState: null,
       logs: [...state.logs, {
         id: `log-halt-${Date.now()}`,
         timestamp: new Date().toLocaleTimeString('en-GB'),
@@ -359,6 +580,10 @@ export const useTrainingStore = create<TrainingStore>((set, get) => ({
       simulationInterval: null,
       eventSource: null,
       activeJobId: null,
+      simState: null,
+      exportStatus: 'not_started',
+      exportProgress: 0,
+      exportModelName: null,
     });
   },
 }));

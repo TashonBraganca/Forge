@@ -2,22 +2,30 @@ import { useMemo, useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useTrainingStore } from '../store/training';
 import { useModelStore } from '../store/models';
+import { api } from '../lib/api';
 import * as Tooltip from '@radix-ui/react-tooltip';
-import { Cpu, HardDrive, Zap, Flame, Download, Loader2, Info } from 'lucide-react';
+import { Cpu, HardDrive, Zap, Flame, Download, Loader2, Info, Square } from 'lucide-react';
 
-/* ─── Inline Loss Curve ─────────────────────────────────── */
+/* ─── Inline Loss Curve with Axes ────────────────────────── */
 function LossCurve({ data }: { data: number[] }) {
-  const W = 700, H = 180;
+  const PADDING_LEFT = 52, PADDING_BOTTOM = 22, PADDING_TOP = 12, PADDING_RIGHT = 8;
+  const TOTAL_W = 740, TOTAL_H = 210;
+  const W = TOTAL_W - PADDING_LEFT - PADDING_RIGHT;
+  const H = TOTAL_H - PADDING_TOP - PADDING_BOTTOM;
   const pathRef = useRef<SVGPathElement>(null);
   const drawn = useRef(false);
 
+  const { maxV, minV } = useMemo(() => {
+    if (data.length < 1) return { maxV: 3.0, minV: 0 };
+    return { maxV: Math.max(...data) * 1.05, minV: Math.max(0, Math.min(...data) * 0.9) };
+  }, [data]);
+
   const linePath = useMemo(() => {
     if (data.length < 2) return '';
-    const maxV = Math.max(...data, 1.6), minV = Math.min(...data, 0);
     const range = maxV - minV || 1;
     const pts = data.map((v, i) => ({
-      x: (i / (data.length - 1)) * W,
-      y: 12 + (1 - (v - minV) / range) * (H - 24),
+      x: PADDING_LEFT + (i / (data.length - 1)) * W,
+      y: PADDING_TOP + (1 - (v - minV) / range) * H,
     }));
     let d = `M ${pts[0].x},${pts[0].y}`;
     for (let i = 1; i < pts.length; i++) {
@@ -25,9 +33,9 @@ function LossCurve({ data }: { data: number[] }) {
       d += ` C ${cx},${pts[i - 1].y} ${cx},${pts[i].y} ${pts[i].x},${pts[i].y}`;
     }
     return d;
-  }, [data]);
+  }, [data, maxV, minV]);
 
-  const fillPath = linePath ? `${linePath} L ${W},${H} L 0,${H} Z` : '';
+  const fillPath = linePath ? `${linePath} L ${PADDING_LEFT + W},${PADDING_TOP + H} L ${PADDING_LEFT},${PADDING_TOP + H} Z` : '';
 
   useEffect(() => {
     if (pathRef.current && !drawn.current && data.length > 1) {
@@ -41,15 +49,37 @@ function LossCurve({ data }: { data: number[] }) {
   }, [data]);
 
   const [embers] = useState(() =>
-    Array.from({ length: 8 }, (_, i) => ({
-      id: i, cx: 30 + Math.random() * (W - 60), cy: 20 + Math.random() * (H - 40),
-      r: 0.6 + Math.random() * 0.8, dur: 2 + Math.random() * 3, del: Math.random() * 4,
+    Array.from({ length: 6 }, (_, i) => ({
+      id: i, cx: PADDING_LEFT + 20 + Math.random() * (W - 40), cy: PADDING_TOP + 10 + Math.random() * (H - 20),
+      r: 0.5 + Math.random() * 0.6, dur: 2.5 + Math.random() * 3, del: Math.random() * 4,
     }))
   );
 
+  // Y-axis ticks (loss values)
+  const yTicks = useMemo(() => {
+    const range = maxV - minV || 1;
+    return [0, 0.25, 0.5, 0.75, 1.0].map((p) => ({
+      value: maxV - p * range,
+      y: PADDING_TOP + p * H,
+    }));
+  }, [maxV, minV]);
+
+  // X-axis ticks (step indices)
+  const xTicks = useMemo(() => {
+    if (data.length < 2) return [];
+    const count = Math.min(6, data.length);
+    return Array.from({ length: count }, (_, i) => {
+      const idx = Math.round((i / (count - 1)) * (data.length - 1));
+      return {
+        label: String(idx),
+        x: PADDING_LEFT + (idx / (data.length - 1)) * W,
+      };
+    });
+  }, [data]);
+
   return (
-    <div className="relative overflow-hidden w-full h-[180px] bg-[rgba(10,10,8,0.6)] rounded-xl border border-[rgba(255,85,0,0.08)]">
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-full" preserveAspectRatio="none">
+    <div className="relative overflow-hidden w-full h-[210px] bg-[rgba(10,10,8,0.6)] rounded-xl border border-[rgba(255,85,0,0.08)]">
+      <svg viewBox={`0 0 ${TOTAL_W} ${TOTAL_H}`} className="w-full h-full" preserveAspectRatio="none">
         <defs>
           <linearGradient id="cs" x1="0" y1="0" x2="1" y2="0">
             <stop offset="0%" stopColor="#CC3300" /><stop offset="50%" stopColor="#FF5500" /><stop offset="100%" stopColor="#FF8C00" />
@@ -58,7 +88,32 @@ function LossCurve({ data }: { data: number[] }) {
             <stop offset="0%" stopColor="rgba(255,85,0,0.2)" /><stop offset="100%" stopColor="rgba(0,0,0,0)" />
           </linearGradient>
         </defs>
-        {[0.25, 0.5, 0.75].map((p) => <line key={p} x1="0" y1={p * H} x2={W} y2={p * H} stroke="rgba(255,85,0,0.04)" strokeWidth="1" />)}
+        {/* Grid lines */}
+        {yTicks.map((t, i) => <line key={`grid-${i}`} x1={PADDING_LEFT} y1={t.y} x2={PADDING_LEFT + W} y2={t.y} stroke="rgba(255,85,0,0.06)" strokeWidth="0.5" />)}
+        {/* Y-axis labels */}
+        {yTicks.map((t, i) => (
+          <text key={`y-${i}`} x={PADDING_LEFT - 6} y={t.y + 1} textAnchor="end" fill="#555" fontSize="8" fontFamily="monospace" dominantBaseline="middle">
+            {t.value.toFixed(2)}
+          </text>
+        ))}
+        {/* Y-axis label */}
+        <text x="8" y={PADDING_TOP + H / 2} fill="#444" fontSize="7" fontFamily="monospace" textAnchor="middle" dominantBaseline="middle" transform={`rotate(-90, 8, ${PADDING_TOP + H / 2})`}>
+          LOSS
+        </text>
+        {/* X-axis labels */}
+        {xTicks.map((t, i) => (
+          <text key={`x-${i}`} x={t.x} y={PADDING_TOP + H + 14} textAnchor="middle" fill="#555" fontSize="7" fontFamily="monospace">
+            {t.label}
+          </text>
+        ))}
+        {/* X-axis label */}
+        <text x={PADDING_LEFT + W / 2} y={TOTAL_H - 2} fill="#444" fontSize="7" fontFamily="monospace" textAnchor="middle">
+          STEP
+        </text>
+        {/* Axis lines */}
+        <line x1={PADDING_LEFT} y1={PADDING_TOP} x2={PADDING_LEFT} y2={PADDING_TOP + H} stroke="rgba(255,85,0,0.1)" strokeWidth="0.5" />
+        <line x1={PADDING_LEFT} y1={PADDING_TOP + H} x2={PADDING_LEFT + W} y2={PADDING_TOP + H} stroke="rgba(255,85,0,0.1)" strokeWidth="0.5" />
+        {/* Chart content */}
         {fillPath && <path d={fillPath} fill="url(#cf)" opacity={data.length > 2 ? 1 : 0} style={{ transition: 'opacity 1s' }} />}
         {linePath && <path ref={pathRef} d={linePath} fill="none" stroke="url(#cs)" strokeWidth="2" strokeLinecap="round" className="glow-forge" />}
         {embers.map((e) => <circle key={e.id} cx={e.cx} cy={e.cy} r={e.r} fill="#FF5500" style={{ animation: `ember-glow ${e.dur}s ease-in-out infinite`, animationDelay: `${e.del}s` }} />)}
@@ -68,12 +123,15 @@ function LossCurve({ data }: { data: number[] }) {
 }
 
 /* ─── Hardware Meter ───────────────────────────────────── */
-function Meter({ label, value, color }: { label: string; value: number; color: string }) {
+function Meter({ label, value, color, detail }: { label: string; value: number; color: string; detail?: string }) {
   return (
     <div className="mb-4">
       <div className="flex justify-between mb-1.5 font-mono text-[11px] uppercase tracking-widest text-[#888]">
         <span>{label}</span>
-        <span className="text-[#ccc]">{value}%</span>
+        <div className="flex items-center gap-2">
+          {detail && <span className="text-[#666] normal-case tracking-normal text-[10px]">{detail}</span>}
+          <span className="text-[#ccc]">{value}%</span>
+        </div>
       </div>
       <div className="h-1 bg-[rgba(255,255,255,0.04)] rounded overflow-hidden">
         <motion.div
@@ -108,20 +166,69 @@ export default function TrainView() {
   const resetTraining = useTrainingStore((s) => s.resetTraining);
   const setSelectedModel = useTrainingStore((s) => s.setSelectedModel);
   const updateConfig = useTrainingStore((s) => s.updateConfig);
+  const exportModel = useTrainingStore((s) => s.exportModel);
+  const exportStatus = useTrainingStore((s) => s.exportStatus);
+  const exportProgress = useTrainingStore((s) => s.exportProgress);
+  const exportModelName = useTrainingStore((s) => s.exportModelName);
   const hubModels = useModelStore((s) => s.hubModels);
+  const fetchOllamaModels = useModelStore((s) => s.fetchOllamaModels);
   const pullModel = useModelStore((s) => s.pullModel);
+  const ollamaSearchResults = useModelStore((s) => s.ollamaSearchResults);
+  const ollamaSearchLoading = useModelStore((s) => s.ollamaSearchLoading);
+  const searchOllamaLibrary = useModelStore((s) => s.searchOllamaLibrary);
+  const clearOllamaSearch = useModelStore((s) => s.clearOllamaSearch);
+  const cancelPull = useModelStore((s) => s.cancelPull);
 
   const isIdle = status === 'idle';
   const isActive = status === 'training' || status === 'preparing';
   const isComplete = status === 'completed';
+  const isFailed = status === 'failed';
   const logRef = useRef<HTMLDivElement>(null);
   const hwStats = useTrainingStore((s) => s.hwStats);
   const backendConnected = useTrainingStore((s) => s.backendConnected);
   const [modelSearchQuery, setModelSearchQuery] = useState('');
+  const [showModelDropdown, setShowModelDropdown] = useState(false);
+  const modelDropdownRef = useRef<HTMLDivElement>(null);
+  const [datasetStatus, setDatasetStatus] = useState('');
+  const [customExportName, setCustomExportName] = useState('');
+
+  // Update export name when model changes
+  useEffect(() => {
+    if (selectedModel) {
+      setCustomExportName(`forge-${selectedModel.split(':')[0]}`);
+    }
+  }, [selectedModel]);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handleClick = (e: MouseEvent) => {
+      if (modelDropdownRef.current && !modelDropdownRef.current.contains(e.target as Node)) {
+        setShowModelDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, []);
+
+  // Trigger Ollama library search when typing
+  const handleModelSearch = (query: string) => {
+    setModelSearchQuery(query);
+    if (query.trim().length >= 2) {
+      searchOllamaLibrary(query.trim());
+      setShowModelDropdown(true);
+    } else {
+      clearOllamaSearch();
+      setShowModelDropdown(false);
+    }
+  };
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [logs]);
+
+  useEffect(() => {
+    fetchOllamaModels();
+  }, [fetchOllamaModels]);
 
   return (
     <Tooltip.Provider delayDuration={200}>
@@ -162,11 +269,15 @@ export default function TrainView() {
                   )}
                   <div className="flex items-center gap-1.5 px-3 py-1 rounded-md bg-[rgba(255,255,255,0.03)] border border-[rgba(255,255,255,0.05)]">
                     <Cpu size={11} className="text-[#888]" />
-                    <span className="font-mono text-[11px] text-[#888]">{hwStats.cpu_name} · {hwStats.cpu_cores}c</span>
+                    <span className="font-mono text-[11px] text-[#888]">{hwStats.cpu_name} | {hwStats.cpu_cores} CORES</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 px-3 py-1 rounded-md bg-[rgba(255,255,255,0.03)] border border-[rgba(255,255,255,0.05)]">
+                    <Cpu size={11} className="text-[#888]" />
+                    <span className="font-mono text-[11px] text-[#888]">{Math.round(hwStats.ram_total_gb)}GB RAM ({hwStats.ram_free_gb}GB AVAILABLE)</span>
                   </div>
                   <div className="flex items-center gap-1.5 px-3 py-1 rounded-md bg-[rgba(255,255,255,0.03)] border border-[rgba(255,255,255,0.05)]">
                     <HardDrive size={11} className="text-[#888]" />
-                    <span className="font-mono text-[11px] text-[#888]">{hwStats.ram_total_gb} GB RAM · {hwStats.disk_free_gb} GB free</span>
+                    <span className="font-mono text-[11px] text-[#888]">{hwStats.disk_free_gb}GB DISK FREE</span>
                   </div>
                   <div className={`px-3 py-1 rounded-md ${hwStats.llamafactory_available ? 'bg-[rgba(34,197,94,0.06)] border-[rgba(34,197,94,0.15)]' : 'bg-[rgba(255,255,255,0.02)] border-[rgba(255,255,255,0.04)]'} border`}>
                     <span className={`font-mono text-[10px] ${hwStats.llamafactory_available ? 'text-green-500' : 'text-[#555]'}`}>
@@ -183,18 +294,106 @@ export default function TrainView() {
                 <div className="absolute inset-0 bg-gradient-to-br from-[rgba(255,85,0,0.03)] to-transparent opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"></div>
                 <h2 className="font-display text-[#888] text-sm uppercase tracking-widest mb-6 font-semibold">Select Model</h2>
                 
-                {/* Search Input */}
-                <div className="flex items-center gap-2 mb-4 px-3 py-2 rounded-md bg-[rgba(255,255,255,0.03)] border border-[rgba(255,255,255,0.05)]">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#888" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-                  <input
-                    type="text"
-                    placeholder="Search models..."
-                    value={modelSearchQuery}
-                    onChange={(e) => setModelSearchQuery(e.target.value)}
-                    className="font-mono text-xs text-[#ccc] bg-transparent border-none outline-none w-full"
-                  />
+                {/* Search Input with Dropdown */}
+                <div className="relative mb-4" ref={modelDropdownRef}>
+                  <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-[rgba(255,255,255,0.03)] border border-[rgba(255,255,255,0.05)]">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#888" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                    <input
+                      type="text"
+                      placeholder="Search installed or discover new models..."
+                      value={modelSearchQuery}
+                      onChange={(e) => handleModelSearch(e.target.value)}
+                      onFocus={() => { if (modelSearchQuery.trim().length >= 2) setShowModelDropdown(true); }}
+                      onKeyDown={(e) => { if (e.key === 'Escape') setShowModelDropdown(false); }}
+                      className="font-mono text-xs text-[#ccc] bg-transparent border-none outline-none w-full"
+                    />
+                    {ollamaSearchLoading && (
+                      <Loader2 size={12} className="animate-spin text-[var(--color-forge-orange)] shrink-0" />
+                    )}
+                    {modelSearchQuery && (
+                      <button onClick={() => { handleModelSearch(''); }} className="text-[#555] hover:text-white transition-colors shrink-0">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Ollama Library Search Dropdown */}
+                  <AnimatePresence>
+                    {showModelDropdown && ollamaSearchResults.length > 0 && (
+                      <motion.div
+                        initial={{ opacity: 0, y: -4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -4 }}
+                        transition={{ duration: 0.15 }}
+                        className="absolute z-50 left-0 right-0 mt-1 rounded-lg bg-[#0e0e0c] border border-[rgba(255,85,0,0.12)] shadow-[0_8px_40px_rgba(0,0,0,0.6)] overflow-hidden max-h-[260px] overflow-y-auto custom-scrollbar"
+                      >
+                        <div className="px-3 py-1.5 border-b border-[rgba(255,255,255,0.03)]">
+                          <span className="font-mono text-[9px] uppercase tracking-widest text-[#555]">
+                            Ollama Library — {ollamaSearchResults.length} result{ollamaSearchResults.length !== 1 ? 's' : ''}
+                          </span>
+                        </div>
+                        {ollamaSearchResults.map((result, i) => {
+                          const alreadyLocal = hubModels.some(m => m.status === 'downloaded' && m.name.split(':')[0] === result.name);
+                          return (
+                            <div key={`${result.name}-${i}`} className="border-b border-[rgba(255,255,255,0.02)] last:border-b-0">
+                              <div className="flex items-center justify-between px-3 py-2.5 hover:bg-[rgba(255,85,0,0.04)] transition-colors">
+                                <div className="flex flex-col gap-0.5 min-w-0 flex-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-display text-[12px] font-semibold text-[#eee]">{result.name}</span>
+                                    {alreadyLocal && (
+                                      <span className="px-1.5 py-0.5 rounded bg-[rgba(34,197,94,0.08)] border border-[rgba(34,197,94,0.15)] font-mono text-[7px] text-green-500 uppercase tracking-wider">installed</span>
+                                    )}
+                                  </div>
+                                  <span className="font-body text-[10px] text-[#666] leading-snug truncate">{result.description}</span>
+                                  {result.tags && result.tags.length > 0 && (
+                                    <div className="flex items-center gap-1 mt-1 flex-wrap">
+                                      {result.tags.slice(0, 6).map((tag) => (
+                                        <button
+                                          key={tag}
+                                          onClick={() => {
+                                            const fullName = `${result.name}:${tag}`;
+                                            if (!confirm(`Download ${fullName} (≈${result.size})?`)) return;
+                                            console.log('[TRAIN] Pulling from search dropdown:', fullName);
+                                            pullModel(fullName);
+                                            setShowModelDropdown(false);
+                                            handleModelSearch('');
+                                          }}
+                                          className="px-1.5 py-0.5 rounded font-mono text-[9px] text-[#888] bg-[rgba(255,255,255,0.03)] border border-[rgba(255,255,255,0.04)] hover:border-[rgba(255,85,0,0.2)] hover:text-[var(--color-forge-amber)] hover:bg-[rgba(255,85,0,0.04)] transition-all cursor-pointer"
+                                        >
+                                          {tag}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-2 ml-2 shrink-0">
+                                  <span className="font-mono text-[9px] text-[#555]">{result.size}</span>
+                                  {!alreadyLocal && (
+                                    <button
+                                      onClick={() => {
+                                        if (!confirm(`Download ${result.name} (≈${result.size})?`)) return;
+                                        console.log('[TRAIN] Pulling from search dropdown:', result.name);
+                                        pullModel(result.name);
+                                        setShowModelDropdown(false);
+                                        handleModelSearch('');
+                                      }}
+                                      className="p-1 rounded bg-[rgba(255,85,0,0.08)] hover:bg-[rgba(255,85,0,0.15)] text-[var(--color-forge-orange)] transition-colors"
+                                      title={`Pull ${result.name}`}
+                                    >
+                                      <Download size={11} />
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </div>
 
+                {/* Local models list */}
                 <div className="max-h-[310px] overflow-y-auto space-y-1 pr-2 custom-scrollbar">
                   {hubModels.filter(m => m.name.toLowerCase().includes(modelSearchQuery.toLowerCase()) || m.params.toLowerCase().includes(modelSearchQuery.toLowerCase())).map((m) => {
                     const sel = selectedModel === m.id;
@@ -221,23 +420,27 @@ export default function TrainView() {
                           sel ? 'bg-[rgba(255,85,0,0.08)] border border-[rgba(255,85,0,0.2)]' : 'hover:bg-[rgba(255,255,255,0.02)] border border-transparent'
                         }`}
                       >
-                        <div className="flex items-center gap-3">
-                          <div className={`w-2 h-2 rounded-full transition-all ${sel ? 'bg-[var(--color-forge-orange)] glow-forge' : 'bg-transparent'}`}></div>
-                          <div className="flex flex-col">
+                        <div className="flex items-center gap-3 flex-1 min-w-0">
+                          <div className={`w-2 h-2 rounded-full transition-all shrink-0 ${sel ? 'bg-[var(--color-forge-orange)] glow-forge' : isDownloading ? 'bg-[var(--color-forge-orange)] animate-pulse' : 'bg-transparent'}`}></div>
+                          <div className="flex flex-col min-w-0 flex-1">
                             <span className={`font-mono text-[13px] ${sel ? 'text-white' : 'text-[#ddd]'}`}>{m.name}</span>
                             {isDownloading && (
-                              <div className="w-32 mt-1.5 h-1.5 bg-[rgba(255,255,255,0.05)] rounded overflow-hidden">
-                                <div className="h-full bg-[var(--color-forge-orange)] transition-all" style={{ width: `${m.downloadProgress || 0}%` }}></div>
+                              <div className="flex items-center gap-2 mt-1">
+                                <div className="flex-1 h-1.5 bg-[rgba(255,255,255,0.05)] rounded-full overflow-hidden">
+                                  <div className="h-full bg-gradient-to-r from-[var(--color-forge-ember)] to-[var(--color-forge-amber)] rounded-full transition-all shadow-[0_0_4px_rgba(255,85,0,0.4)]" style={{ width: `${m.downloadProgress || 0}%` }}></div>
+                                </div>
+                                <span className="font-mono text-[10px] text-[var(--color-forge-orange)] font-bold shrink-0">{m.downloadProgress}%</span>
                               </div>
                             )}
                           </div>
                         </div>
-                        <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-2 shrink-0">
                           <span className="font-mono text-[11px] bg-[rgba(255,255,255,0.03)] px-2 py-1 rounded text-[#888]">{m.params}</span>
                           {!isDownloaded && !isDownloading && (
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
+                                console.log('[TRAIN] Pulling model from list:', m.id);
                                 pullModel(m.id);
                               }}
                               className="p-1.5 rounded bg-[rgba(255,255,255,0.05)] hover:bg-[rgba(255,85,0,0.1)] hover:text-[var(--color-forge-orange)] text-[#888] transition-colors"
@@ -247,7 +450,16 @@ export default function TrainView() {
                             </button>
                           )}
                           {isDownloading && (
-                            <Loader2 size={14} className="text-[var(--color-forge-orange)] animate-spin" />
+                            <>
+                              <Loader2 size={14} className="text-[var(--color-forge-orange)] animate-spin" />
+                              <button
+                                onClick={(e) => { e.stopPropagation(); cancelPull(m.name); }}
+                                className="p-1 rounded hover:bg-[rgba(239,68,68,0.1)] text-[#666] hover:text-red-500 transition-colors"
+                                title="Cancel download"
+                              >
+                                <Square size={11} />
+                              </button>
+                            </>
                           )}
                         </div>
                       </div>
@@ -255,7 +467,11 @@ export default function TrainView() {
                   })}
                   {hubModels.filter(m => m.name.toLowerCase().includes(modelSearchQuery.toLowerCase()) || m.params.toLowerCase().includes(modelSearchQuery.toLowerCase())).length === 0 && (
                     <div className="p-5 text-center font-mono text-xs text-[#666]">
-                      No models found matching "{modelSearchQuery}"
+                      {modelSearchQuery
+                        ? `No local models matching "${modelSearchQuery}" — check the dropdown above for remote models`
+                        : backendConnected
+                          ? 'No Ollama models available yet. Search above to discover and pull models.'
+                          : 'Backend offline. Start Forge to load available models.'}
                     </div>
                   )}
                 </div>
@@ -388,7 +604,7 @@ export default function TrainView() {
                     <div className="flex flex-col gap-3 p-3 bg-[rgba(0,0,0,0.2)] rounded-lg border border-[rgba(255,255,255,0.03)]">
                       <input
                         type="text"
-                        placeholder="HuggingFace / Kaggle URL..."
+                        placeholder="Uploaded dataset ID or custom path..."
                         onChange={(e) => updateConfig({ dataset: e.target.value })}
                         className="w-full font-mono text-[11px] text-[#ccc] bg-[rgba(255,255,255,0.02)] border border-[rgba(255,255,255,0.05)] rounded px-3 py-2 outline-none focus:border-[rgba(255,85,0,0.3)] transition-colors placeholder:text-[#555]"
                       />
@@ -401,13 +617,25 @@ export default function TrainView() {
 
                       <input
                         type="file"
-                        accept=".jsonl,.json,.csv,.parquet"
-                        onChange={(e) => {
+                        accept=".jsonl,.json,.csv"
+                        onChange={async (e) => {
                           const file = e.target.files?.[0];
-                          if (file) updateConfig({ dataset: file.name });
+                          if (!file) return;
+
+                          setDatasetStatus(`Uploading ${file.name}...`);
+                          try {
+                            const meta = await api.uploadDataset(file);
+                            updateConfig({ dataset: meta.id });
+                            setDatasetStatus(`Uploaded as ${meta.id}`);
+                          } catch {
+                            setDatasetStatus('Upload failed');
+                          }
                         }}
                         className="w-full font-mono text-[11px] text-[#ccc] cursor-pointer file:mr-4 file:py-1 file:px-3 file:rounded file:border-0 file:bg-[rgba(255,85,0,0.1)] file:text-[var(--color-forge-amber)] hover:file:bg-[rgba(255,85,0,0.2)] transition-colors"
                       />
+                      {datasetStatus && (
+                        <p className="font-mono text-[10px] text-[#666]">{datasetStatus}</p>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -429,8 +657,8 @@ export default function TrainView() {
           </motion.div>
         )}
 
-        {/* ═══════ TRAINING STATE ═══════ */}
-        {(isActive || isComplete) && (
+        {/* ═══════ TRAINING / FAILED STATE ═══════ */}
+        {(isActive || isComplete || isFailed) && (
           <motion.div key="active" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }}>
             <div className="grid gap-6 md:grid-cols-[1.4fr_1fr]">
               {/* Left: Big progress */}
@@ -438,9 +666,9 @@ export default function TrainView() {
                 <div className="absolute w-[260px] h-[260px] bg-[radial-gradient(circle,rgba(255,85,0,0.08),transparent_70%)] rounded-full blur-[40px]" />
                 
                 <div className="flex items-center gap-2 mb-6 relative z-10">
-                  <div className={`w-2 h-2 rounded-full ${isComplete ? 'bg-green-500' : 'bg-[var(--color-forge-orange)] animate-[pulse-dot_2s_ease-in-out_infinite] glow-forge'}`} />
-                  <span className={`font-mono text-[11px] tracking-widest ${isComplete ? 'text-green-500' : 'text-[var(--color-forge-orange)]'}`}>
-                    {isComplete ? 'COMPLETE' : 'FORGING'} · {selectedModel}
+                  <div className={`w-2 h-2 rounded-full ${isComplete ? 'bg-green-500' : isFailed ? 'bg-red-500' : 'bg-[var(--color-forge-orange)] animate-[pulse-dot_2s_ease-in-out_infinite] glow-forge'}`} />
+                  <span className={`font-mono text-[11px] tracking-widest ${isComplete ? 'text-green-500' : isFailed ? 'text-red-500' : 'text-[var(--color-forge-orange)]'}`}>
+                    {isComplete ? 'COMPLETE' : isFailed ? 'FAILED' : 'FORGING'} · {selectedModel}
                   </span>
                 </div>
                 
@@ -456,6 +684,7 @@ export default function TrainView() {
                     className="h-full rounded bg-gradient-to-r from-[var(--color-forge-ember)] via-[var(--color-forge-orange)] to-[var(--color-forge-moccasin)] shadow-[0_0_14px_rgba(255,85,0,0.5)]"
                     animate={{ width: `${progress}%` }}
                     transition={{ duration: 0.8 }}
+                    style={{ backgroundColor: isFailed ? '#ef4444' : undefined, backgroundImage: isFailed ? 'none' : undefined }}
                   />
                   <motion.div className="absolute top-1/2 -translate-y-1/2 w-2.5 h-2.5 bg-[radial-gradient(circle,rgba(255,228,181,0.8),transparent)] blur-[3px] rounded-full" animate={{ left: `${progress}%` }} transition={{ duration: 0.8 }} />
                 </div>
@@ -466,7 +695,7 @@ export default function TrainView() {
               <div className="grid grid-cols-2 gap-4">
                 {[
                   { label: 'LOSS', value: currentLoss > 0 ? currentLoss.toFixed(4) : '—', color: '#fff', size: 'text-3xl' },
-                  { label: 'EPOCH', value: `${currentEpoch}/${totalEpochs}`, color: '#fff', size: 'text-3xl' },
+                  { label: 'EPOCH', value: `${currentEpoch || 0}/${totalEpochs || config.epochs}`, color: '#fff', size: 'text-3xl' },
                   {
                     label: 'GPU TEMP',
                     value: hwStats?.gpu_temp_c ? `${Math.round(hwStats.gpu_temp_c)}°C` : gpuTemp > 0 ? `${gpuTemp}°C` : '—',
@@ -522,10 +751,30 @@ export default function TrainView() {
 
               <div className="forge-card p-6">
                 <h2 className="font-display text-[#888] text-sm uppercase tracking-widest mb-4 font-semibold">Furnace Status</h2>
-                <Meter label="GPU CORE" value={gpuUtil} color="var(--color-forge-orange)" />
-                <Meter label="VRAM" value={vramUtil} color="var(--color-forge-amber)" />
-                <Meter label="CPU" value={cpuUtil} color="#666" />
-                <Meter label="RAM" value={ramUtil} color="#666" />
+                <Meter
+                  label={hwStats?.gpu_name ? `GPU · ${hwStats.gpu_name}` : 'GPU CORE'}
+                  value={gpuUtil}
+                  color="var(--color-forge-orange)"
+                  detail={hwStats?.gpu_temp_c ? `${Math.round(hwStats.gpu_temp_c)}°C` : undefined}
+                />
+                <Meter
+                  label="VRAM"
+                  value={vramUtil}
+                  color="var(--color-forge-amber)"
+                  detail={hwStats?.vram_total_gb ? `${(hwStats.vram_total_gb - hwStats.vram_free_gb).toFixed(1)} / ${hwStats.vram_total_gb.toFixed(1)} GB` : undefined}
+                />
+                <Meter
+                  label="CPU"
+                  value={cpuUtil}
+                  color="#888"
+                  detail={hwStats?.cpu_cores ? `${hwStats.cpu_cores}C / ${hwStats.cpu_threads}T` : undefined}
+                />
+                <Meter
+                  label="RAM"
+                  value={ramUtil}
+                  color="#888"
+                  detail={hwStats?.ram_total_gb ? `${(hwStats.ram_total_gb - hwStats.ram_free_gb).toFixed(1)} / ${hwStats.ram_total_gb.toFixed(1)} GB` : undefined}
+                />
               </div>
             </div>
 
@@ -538,13 +787,98 @@ export default function TrainView() {
                   HALT TRAINING
                 </button>
               )}
-              {isComplete && (
-                <button
-                  onClick={resetTraining}
-                  className="w-full h-[52px] rounded-xl bg-gradient-to-br from-[var(--color-forge-ember)] via-[var(--color-forge-orange)] to-[var(--color-forge-amber)] text-black font-display text-[13px] font-bold tracking-[0.12em] shadow-[0_4px_30px_rgba(255,85,0,0.25)] transition-all active:scale-[0.998]"
-                >
-                  FORGE ANOTHER
-                </button>
+              {(isComplete || isFailed) && (
+                <div className="flex flex-col gap-4">
+                  {isComplete && exportStatus === 'not_started' && (
+                    <div className="forge-card p-6 flex flex-col gap-4">
+                      <h3 className="font-display text-[#888] text-sm uppercase tracking-widest font-semibold">Export to Ollama</h3>
+                      <div className="flex items-center gap-4">
+                        <input
+                          type="text"
+                          value={customExportName}
+                          onChange={(e) => setCustomExportName(e.target.value)}
+                          placeholder="Name your forged model..."
+                          className="flex-1 bg-[rgba(255,255,255,0.02)] border border-[rgba(255,255,255,0.05)] rounded-lg px-4 py-3 font-mono text-[13px] text-[#ccc] focus:outline-none focus:border-[rgba(255,85,0,0.3)] transition-colors"
+                        />
+                        <button
+                          onClick={() => exportModel(customExportName)}
+                          disabled={!customExportName.trim()}
+                          className="px-6 py-3 rounded-lg bg-[rgba(255,85,0,0.1)] border border-[rgba(255,85,0,0.2)] text-[var(--color-forge-orange)] font-display text-[13px] font-bold tracking-[0.1em] transition-all hover:bg-[rgba(255,85,0,0.15)] disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          EXPORT GGUF
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  
+                  {isComplete && (exportStatus === 'pending' || exportStatus === 'running') && (
+                    <div className="forge-card flex flex-col justify-center relative overflow-hidden p-6 border-[rgba(255,85,0,0.2)]">
+                      <div className="absolute w-[200px] h-[200px] left-0 top-1/2 -translate-y-1/2 bg-[radial-gradient(circle,rgba(255,85,0,0.05),transparent_70%)] blur-[30px]" />
+                      <div className="flex items-center gap-3 relative z-10 mb-4">
+                        <div className="w-2 h-2 rounded-full bg-[var(--color-forge-orange)] animate-[pulse-dot_2s_ease-in-out_infinite]" />
+                        <span className="font-mono text-[13px] text-[var(--color-forge-amber)] flex-1">
+                          Exporting {exportModelName} to Ollama... (This may take a while)
+                        </span>
+                        <span className="font-mono text-[13px] text-white">
+                          {Math.floor(exportProgress)}%
+                        </span>
+                      </div>
+                      <div className="w-full h-1 bg-[rgba(255,255,255,0.04)] rounded relative z-10">
+                        <motion.div
+                          className="h-full rounded bg-gradient-to-r from-[var(--color-forge-ember)] via-[var(--color-forge-orange)] to-[var(--color-forge-amber)] shadow-[0_0_10px_rgba(255,85,0,0.3)]"
+                          animate={{ width: `${exportProgress}%` }}
+                          transition={{ duration: 0.5 }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {isComplete && exportStatus === 'completed' && (
+                    <div className="forge-card p-6 flex flex-col gap-4 border-[rgba(34,197,94,0.2)] bg-[rgba(34,197,94,0.02)]">
+                      <div className="flex items-center gap-3">
+                        <div className="w-2 h-2 rounded-full bg-green-500" />
+                        <span className="font-mono text-[13px] text-green-500">
+                          Successfully exported {exportModelName} to Ollama! You can now chat with it.
+                        </span>
+                      </div>
+                      <button
+                        onClick={() => window.location.href = '/'}
+                        className="w-full py-3 rounded-lg bg-[rgba(34,197,94,0.1)] border border-[rgba(34,197,94,0.2)] text-green-500 font-display text-[13px] font-bold tracking-[0.1em] transition-all hover:bg-[rgba(34,197,94,0.15)]"
+                      >
+                        CHAT WITH MODEL
+                      </button>
+                    </div>
+                  )}
+
+                  {isComplete && exportStatus === 'failed' && (
+                    <div className="forge-card p-6 flex flex-col gap-4 border-[rgba(239,68,68,0.3)] bg-[rgba(239,68,68,0.02)]">
+                      <div className="flex items-center gap-3">
+                        <div className="w-2 h-2 rounded-full bg-red-500" />
+                        <span className="font-mono text-[13px] text-red-400">
+                          Export failed. Check the output log for details.
+                        </span>
+                      </div>
+                      <button
+                        onClick={() => exportModel(customExportName)}
+                        disabled={!customExportName.trim()}
+                        className="w-full py-3 rounded-lg bg-[rgba(255,85,0,0.1)] border border-[rgba(255,85,0,0.2)] text-[var(--color-forge-orange)] font-display text-[13px] font-bold tracking-[0.1em] transition-all hover:bg-[rgba(255,85,0,0.15)] disabled:opacity-50"
+                      >
+                        RETRY EXPORT
+                      </button>
+                    </div>
+                  )}
+
+                  <button
+                    onClick={resetTraining}
+                    className={`w-full h-[52px] rounded-xl font-display text-[13px] font-bold tracking-[0.12em] transition-all active:scale-[0.998] ${
+                      isFailed 
+                        ? 'bg-[rgba(239,68,68,0.1)] border border-[rgba(239,68,68,0.3)] text-red-500 hover:bg-[rgba(239,68,68,0.15)]' 
+                        : 'bg-transparent border border-[rgba(255,255,255,0.05)] text-[#666] hover:bg-[rgba(255,255,255,0.02)] hover:text-[#bbb]'
+                    }`}
+                  >
+                    {isFailed ? 'DISCARD & RETRY' : 'START NEW TRAINING JOB'}
+                  </button>
+                </div>
               )}
             </div>
           </motion.div>

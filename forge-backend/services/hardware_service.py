@@ -165,7 +165,11 @@ def _get_gpu_info() -> dict:
 
 # ── Main API ────────────────────────────────────────────────────────
 
-async def get_hardware_stats(ollama_running: bool) -> HardwareStats:
+async def get_hardware_stats(
+    ollama_running: bool,
+    db_ready: bool = False,
+    training_backend_available: bool = False,
+) -> HardwareStats:
     """Gather full real-time hardware stats. Sub-200ms thanks to caching."""
     from config import settings
 
@@ -215,4 +219,11 @@ async def get_hardware_stats(ollama_running: bool) -> HardwareStats:
         # System
         platform=f"{platform.system()} {platform.machine()}",
         forge_version="1.0.0",
+        db_ready=db_ready,
+        database_path=str(settings.database_path),
+        datasets_dir_ready=settings.datasets_dir.exists(),
+        models_dir_ready=settings.models_dir.exists(),
+        jobs_dir_ready=settings.jobs_dir.exists(),
+        training_backend_available=training_backend_available,
+        simulation_fallback_available=settings.allow_simulation_fallback,
     )
