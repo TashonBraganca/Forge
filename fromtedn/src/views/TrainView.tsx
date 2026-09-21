@@ -38,15 +38,20 @@ function LossCurve({ data }: { data: number[] }) {
   const fillPath = linePath ? `${linePath} L ${PADDING_LEFT + W},${PADDING_TOP + H} L ${PADDING_LEFT},${PADDING_TOP + H} Z` : '';
 
   useEffect(() => {
-    if (pathRef.current && !drawn.current && data.length > 1) {
-      drawn.current = true;
+    if (pathRef.current && data.length > 1) {
       const el = pathRef.current;
       const len = el.getTotalLength();
-      el.style.strokeDasharray = `${len}`;
-      el.style.strokeDashoffset = `${len}`;
-      el.style.animation = 'draw-path 2s cubic-bezier(0.16,1,0.3,1) forwards';
+      
+      if (!drawn.current) {
+        drawn.current = true;
+        el.style.strokeDasharray = `${len}`;
+        el.style.strokeDashoffset = `${len}`;
+        el.style.animation = 'draw-path 2s cubic-bezier(0.16,1,0.3,1) forwards';
+      } else {
+        el.style.strokeDasharray = `${len}`;
+      }
     }
-  }, [data]);
+  }, [data, linePath]);
 
   const [embers] = useState(() =>
     Array.from({ length: 6 }, (_, i) => ({
